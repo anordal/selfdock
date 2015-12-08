@@ -1,6 +1,6 @@
 /*
  * Copyright 2015 Andreas Nordal
- * 
+ *
  * This Source Code Form is subject to the terms of the
  * Mozilla Public License, v. 2.0.
  * If a copy of the MPL was not distributed with this file,
@@ -78,7 +78,7 @@ cleanup_proc:
 	}
 }
 
-int main(int argc, char *argv[], char *envp[])
+int main(int argc, char *argv[])
 {
 	int ret = EXIT_WEFAILED;
 
@@ -109,7 +109,11 @@ int main(int argc, char *argv[], char *envp[])
 	}
 	// point of no return without cleanup
 	if (mount_root(argv[1], newroot)) {
-		perror(newroot);
+		if (errno == ENODEV) {
+			fprintf(stderr, "Overlayfs (Linux 3.18 or newer) needed. Sorry.\n");
+		} else {
+			perror(newroot);
+		}
 		goto cleanup_rmdir;
 	}
 
