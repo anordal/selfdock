@@ -24,6 +24,20 @@
 
 #define EXIT_WEFAILED 125 // Understood by git-bisect as indeterminate.
 
+// Drop euid privileges temporarily for the directory creation.
+// It would be a security problem to expose directory creation
+// with elevated privileges if the user can influence the path.
+static int mkdir_as_realuser(const char *path, int mode)
+{
+	uid_t effective = geteuid();
+	if (seteuid(getuid())) return -1;
+
+	int ret = mkdir(path, mode);
+
+	if (seteuid(effective)) return -1;
+	return ret;
+}
+
 static int mount_root(const char *from, const char *to)
 {
 	char path[PATH_MAX];
@@ -103,7 +117,7 @@ int main(int argc, char *argv[])
 		goto fail;
 	}
 
-	if (mkdir(newroot, 0x777)) {
+	if (mkdir_as_realuser(newroot, 0x777)) {
 		perror(newroot);
 		goto fail;
 	}
