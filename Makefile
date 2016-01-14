@@ -12,3 +12,9 @@ install: /usr/local/bin/selfdock | /usr/local/share/selfdock/dev/null
 	mknod $@_tmp c 1 3
 	chmod 666 $@_tmp
 	mv $@_tmp $@
+
+MODULETESTS=$(wildcard moduletest/*)
+.PHONY: test $(MODULETESTS)
+test: $(MODULETESTS)
+$(MODULETESTS):
+	$@
