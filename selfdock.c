@@ -22,7 +22,12 @@
 #	define PATH_MAX 1024
 #endif
 
-#define EXIT_WEFAILED 125 // Understood by git-bisect as indeterminate.
+// Try to conform or give way to existing exit status conventions
+#define EXIT_NAME_IN_USE 123 //self-defined
+#define EXIT_CANNOT      124 //self-defined
+#define EXIT_UNTESTABLE  125 //inapplicable convention (git-bisect)
+#define EXIT_CMDNOTEXEC  126 //applicable convention
+#define EXIT_CMDNOTFOUND 127 //applicable convention
 
 // Drop euid privileges temporarily for the directory creation.
 // It would be a security problem to expose directory creation
@@ -48,53 +53,58 @@ static int mount_root(const char *from, const char *to)
 	return mount("none", to, "overlay", MS_RDONLY, path);
 }
 
-static void nukemounts(const char *root, int *ret)
+static void nukemounts(const char *root)
 {
 	char path[PATH_MAX];
 	snprintf(path, PATH_MAX, "%s/proc", root);
 	if (umount(path)) {
-		// MISUSE_INEXISTENCY_OF_PROC_TO_INDICATE_CHILD_FAIL: here we detect proc
-		if (errno == EINVAL) *ret = EXIT_WEFAILED;
-		else perror(path);
+		perror(path);
 	}
 
 	// TODO: Parse proc/mounts (sort by length) for more mountpoints
 }
 
-static void child(const char *fs, char *const argv[])
+static int child(const char *fs, char *const argv[])
 {
 	if (chdir(fs)) {
 		fprintf(stderr, "chdir(%s): %s\n", fs, strerror(errno));
-		return;
+		return EXIT_CANNOT;
 	}
 	if (chroot(".")) {
 		fprintf(stderr, "chroot(%s): %s\n", fs, strerror(errno));
-		return;
+		return EXIT_CANNOT;
 	}
 
 	if (mount("none", "proc", "proc", MS_RDONLY|MS_NOEXEC, NULL)) {
 		perror("mount proc");
-		return;
+		return EXIT_CANNOT;
 	}
 
 	// Drop effective uid
 	if (setuid(getuid())) {
 		perror("setuid");
-		goto cleanup_proc;
+		return EXIT_CANNOT;
 	}
-	execvp(argv[0], argv);
-	fprintf(stderr, "exec(%s): %s\n", argv[0], strerror(errno));
 
-	// MISUSE_INEXISTENCY_OF_PROC_TO_INDICATE_CHILD_FAIL: here is the failure
-cleanup_proc:
-	if (umount("proc")) {
-		perror("umount proc");
+	execvp(argv[0], argv);
+
+	// fail
+	int errval = errno;
+	fprintf(stderr, "exec(%s): %s\n", argv[0], strerror(errval));
+	switch(errval) {
+		case ELOOP:
+		case ENAMETOOLONG:
+		case ENOENT:
+		case ENOTDIR:
+			return EXIT_CMDNOTFOUND;
+		default:
+			return EXIT_CMDNOTEXEC;
 	}
 }
 
 int main(int argc, char *argv[])
 {
-	int ret = EXIT_WEFAILED;
+	int ret = EXIT_CANNOT;
 
 	if (argc < 4) {
 		printf("Usage: %s rootdir label argv\n", argv[0]);
@@ -119,6 +129,9 @@ int main(int argc, char *argv[])
 
 	if (mkdir_as_realuser(newroot, 0x777)) {
 		perror(newroot);
+		if (errno == EEXIST) {
+			ret = EXIT_NAME_IN_USE;
+		}
 		goto fail;
 	}
 	// point of no return without cleanup
@@ -135,8 +148,7 @@ int main(int argc, char *argv[])
 	if (pid == -1) {
 		fprintf(stderr, "fork(): %s\n", strerror(errno));
 	} else if (pid == 0) {
-		child(newroot, argv+3);
-		return EXIT_WEFAILED;
+		return child(newroot, argv+3);
 	} else {
 		int status;
 		if (-1 == waitpid(pid, &status, 0)) {
@@ -147,7 +159,7 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "%s: killed by signal %d\n", argv[0], WTERMSIG(status));
 		}
 	}
-	nukemounts(newroot, &ret);
+	nukemounts(newroot);
 
 	if (umount(newroot)) {
 		perror(newroot);
