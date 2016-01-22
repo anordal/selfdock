@@ -43,35 +43,65 @@ static int mkdir_as_realuser(const char *path, int mode)
 	return ret;
 }
 
-static int mount_root(const char *from, const char *to)
+// Use overlayfs to emulate a readonly bind mount when required,
+// as indicated by a non-NULL @upper argumment, else bind mount.
+// Errmsg printing taken care of.
+static int mount_bind(const char* lower, const char* upper, const char* dst)
 {
-	char path[PATH_MAX];
-	if (PATH_MAX <= snprintf(path, PATH_MAX, "lowerdir=/usr/local/share/selfdock:%s", from)) {
-		errno = ENAMETOOLONG;
-		return -1;
+	const char *errmsg;
+	if (upper) {
+		char opt[PATH_MAX];
+		if (PATH_MAX <= snprintf(opt, PATH_MAX, "lowerdir=%s:%s", upper, lower)) {
+			errmsg = strerror(ENAMETOOLONG);
+			goto fail;
+		}
+		if (mount("none", dst, "overlay", MS_RDONLY, opt)) {
+			errmsg = (errno == ENODEV)
+				? "Overlayfs (Linux 3.18 or newer) needed. "
+				"Sorry, this requirement is a Linux specific workaround "
+				"for lack of a readonly bindmount."
+				: strerror(errno)
+			;
+			goto fail;
+		}
+	} else {
+		if (mount(lower, dst, NULL, MS_BIND, NULL)) {
+			errmsg = strerror(errno);
+			goto fail;
+		}
 	}
-	return mount("none", to, "overlay", MS_RDONLY, path);
+	return 0;
+
+fail:
+	fprintf(stderr, "bindmount «%s» → «%s»: %s\n", lower, dst, errmsg);
+	return -1;
 }
 
-static void nukemounts(const char *root)
+static int child(const char *oldroot, const char *newroot, char *const argv[])
 {
-	char path[PATH_MAX];
-	snprintf(path, PATH_MAX, "%s/proc", root);
-	if (umount(path)) {
-		perror(path);
+	// CLONE_NEWNS must be applied in the child process
+	if (unshare(CLONE_NEWNS)) {
+		perror("unshare");
+		return EXIT_CANNOT;
+	}
+	// The containing mountpoint must be marked private. How this is supposed
+	// to be done is AFAIK undocumented, but this trick, recursing from root,
+	// was taken from http://sourceforge.net/p/fuse/mailman/message/24957287/
+	if (mount(NULL, "/", NULL, MS_PRIVATE|MS_REC, NULL)) {
+		fprintf(stderr, "Failed to mark all mounts private: %s\n", strerror(errno));
+		return EXIT_CANNOT;
 	}
 
-	// TODO: Parse proc/mounts (sort by length) for more mountpoints
-}
+	if (mount_bind(oldroot, "/usr/local/share/selfdock", newroot)) {
+		return EXIT_CANNOT;
+	}
 
-static int child(const char *fs, char *const argv[])
-{
-	if (chdir(fs)) {
-		fprintf(stderr, "chdir(%s): %s\n", fs, strerror(errno));
+	if (chdir(newroot)) {
+		fprintf(stderr, "chdir(%s): %s\n", newroot, strerror(errno));
 		return EXIT_CANNOT;
 	}
 	if (chroot(".")) {
-		fprintf(stderr, "chroot(%s): %s\n", fs, strerror(errno));
+		fprintf(stderr, "chroot(%s): %s\n", newroot, strerror(errno));
 		return EXIT_CANNOT;
 	}
 
@@ -104,51 +134,41 @@ static int child(const char *fs, char *const argv[])
 
 int main(int argc, char *argv[])
 {
-	int ret = EXIT_CANNOT;
-
 	if (argc < 4) {
 		printf("Usage: %s rootdir label argv\n", argv[0]);
-		goto fail;
+		return EXIT_CANNOT;
 	}
 
+	// CLONE_NEWPID must be applied in the parent process
 	if (unshare(CLONE_NEWPID)) {
 		perror("unshare");
-		goto fail;
+		return EXIT_CANNOT;
 	}
 
 	const char *rundir = getenv("XDG_RUNTIME_DIR");
 	if (!rundir) {
 		fputs("Please set XDG_RUNTIME_DIR.\n", stderr);
-		goto fail;
+		return EXIT_CANNOT;
 	}
 	char newroot[64]; //who wants long labels
 	if (sizeof(newroot) <= snprintf(newroot, sizeof(newroot), "%s/%s", rundir, argv[2])) {
 		fprintf(stderr, "%s/%s: %s\n", rundir, argv[2], strerror(ENAMETOOLONG));
-		goto fail;
+		return EXIT_CANNOT;
 	}
 
 	if (mkdir_as_realuser(newroot, 0x777)) {
 		perror(newroot);
-		if (errno == EEXIST) {
-			ret = EXIT_NAME_IN_USE;
-		}
-		goto fail;
-	}
-	// point of no return without cleanup
-	if (mount_root(argv[1], newroot)) {
-		if (errno == ENODEV) {
-			fprintf(stderr, "Overlayfs (Linux 3.18 or newer) needed. Sorry.\n");
-		} else {
-			perror(newroot);
-		}
-		goto cleanup_rmdir;
+		return (errno == EEXIST)
+			? EXIT_NAME_IN_USE
+			: EXIT_CANNOT;
 	}
 
+	int ret = EXIT_CANNOT;
 	pid_t pid = fork();
 	if (pid == -1) {
 		fprintf(stderr, "fork(): %s\n", strerror(errno));
 	} else if (pid == 0) {
-		return child(newroot, argv+3);
+		return child(argv[1], newroot, argv+3);
 	} else {
 		int status;
 		if (-1 == waitpid(pid, &status, 0)) {
@@ -159,16 +179,8 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "%s: killed by signal %d\n", argv[0], WTERMSIG(status));
 		}
 	}
-	nukemounts(newroot);
-
-	if (umount(newroot)) {
-		perror(newroot);
-		goto fail;
-	}
-cleanup_rmdir:
 	if (rmdir(newroot)) {
 		perror(newroot);
 	}
-fail:
 	return ret;
 }
