@@ -17,4 +17,4 @@ MODULETESTS=$(wildcard moduletest/*)
 .PHONY: test $(MODULETESTS)
 test: $(MODULETESTS)
 $(MODULETESTS):
-	$@
+	$@ $(subst /,_,$@)
