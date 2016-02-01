@@ -1,7 +1,21 @@
-#!/bin/sh -e
+#!/bin/bash -e
 test "$XDG_RUNTIME_DIR" = '' && XDG_RUNTIME_DIR=/tmp
 
-! selfdock / "$1" cp /bin/sh / 2>/dev/null
-! selfdock / "$1" cp /bin/sh /dev/ 2>/dev/null
+s=( selfdock / "$1" )
+s4=( "${s[@]}" "${s[@]}" "${s[@]}" "${s[@]}" )
+s16=( "${s4[@]}" "${s4[@]}" "${s4[@]}" "${s4[@]}" )
 
-test "$(selfdock / "$1" sh -ec 'echo fail > /dev/null && cat /dev/null')" = ''
+"${s16[@]}" true
+
+! "${s[@]}" cp /bin/sh / 2>/dev/null
+! "${s[@]}" cp /bin/sh /dev/ 2>/dev/null
+! "${s4[@]}" cp /bin/sh / 2>/dev/null
+! "${s4[@]}" cp /bin/sh /dev/ 2>/dev/null
+! "${s16[@]}" cp /bin/sh / 2>/dev/null
+! "${s16[@]}" cp /bin/sh /dev/ 2>/dev/null
+
+t=( sh -ec 'echo fail > /dev/null && cat /dev/null' )
+
+test "$("${s[@]}" "${t[@]}")" = ''
+test "$("${s4[@]}" "${t[@]}")" = ''
+test "$("${s16[@]}" "${t[@]}")" = ''

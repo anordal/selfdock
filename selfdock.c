@@ -10,6 +10,7 @@
 #define _GNU_SOURCE
 #include <sched.h> //unshare
 #include <errno.h>
+#include <fcntl.h> //open
 #include <sys/stat.h> //mkdir
 #include <sys/wait.h>
 #include <sys/mount.h>
@@ -77,7 +78,62 @@ fail:
 	return -1;
 }
 
-static int child(const char *oldroot, const char *newroot, char *const argv[])
+// assume no (writable) on failure
+static _Bool is_readonly_rootfs(const char *rootdir)
+{
+	char path[PATH_MAX];
+	if (PATH_MAX <= snprintf(path, PATH_MAX, "%s/bin/sh", rootdir)) {
+		return 0;
+	}
+
+	int fd = open(path, O_RDWR);
+	if (fd != -1) {
+		close(fd);
+		return 0;
+	}
+
+	return (errno == EROFS);
+}
+
+static int tmpfs_mkdir_dirname(
+	const char *dirname, struct stat *statbuf,
+	int flag, const char *opt)
+{
+	if (0 == stat(dirname, statbuf)) {
+		return mount("none", dirname, "tmpfs", flag, opt);
+	}
+
+	char *basename = strrchr(dirname, '/');
+	if (!basename || basename == dirname) {
+		// stat set errno
+		return -1; //fail
+	}
+
+	*basename = '\0';
+	int ret = tmpfs_mkdir_dirname(dirname, statbuf, flag, opt);
+	*basename = '/';
+
+	if (mkdir(dirname, 0755)) {
+		ret = -1;
+	}
+	return ret;
+}
+
+static int tmpfs_mkdir(const char *path, int flag, const char *opt)
+{
+	char dirname[PATH_MAX];
+	if (PATH_MAX <= snprintf(dirname, PATH_MAX, "%s", path)) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+
+	struct stat statbuf;
+	return tmpfs_mkdir_dirname(dirname, &statbuf, flag, opt);
+}
+
+static int child(
+	const char *oldroot, const char *newroot,
+	const char *rundir, char *const argv[])
 {
 	// CLONE_NEWNS must be applied in the child process
 	if (unshare(CLONE_NEWNS)) {
@@ -92,7 +148,14 @@ static int child(const char *oldroot, const char *newroot, char *const argv[])
 		return EXIT_CANNOT;
 	}
 
-	if (mount_bind(oldroot, "/usr/local/share/selfdock", newroot)) {
+	// Use overlayfs sparingly; it has a maximum stacking depth.
+	_Bool already_readonly = is_readonly_rootfs(oldroot);
+
+	if (mount_bind(
+		oldroot,
+		already_readonly ? NULL : "/usr/local/share/selfdock",
+		newroot))
+	{
 		return EXIT_CANNOT;
 	}
 
@@ -100,6 +163,13 @@ static int child(const char *oldroot, const char *newroot, char *const argv[])
 		fprintf(stderr, "chdir(%s): %s\n", newroot, strerror(errno));
 		return EXIT_CANNOT;
 	}
+
+	if (already_readonly) {
+		if (mount_bind("/usr/local/share/selfdock/dev", NULL, "dev")) {
+			return EXIT_CANNOT;
+		}
+	}
+
 	if (chroot(".")) {
 		fprintf(stderr, "chroot(%s): %s\n", newroot, strerror(errno));
 		return EXIT_CANNOT;
@@ -110,8 +180,18 @@ static int child(const char *oldroot, const char *newroot, char *const argv[])
 		return EXIT_CANNOT;
 	}
 
+	if (tmpfs_mkdir(rundir, MS_NOEXEC, "size=2M")) {
+		perror(rundir);
+		return EXIT_CANNOT;
+	}
+	uid_t uid = getuid();
+	if (chown(rundir, uid, -1)) {
+		perror(rundir);
+		return EXIT_CANNOT;
+	}
+
 	// Drop effective uid
-	if (setuid(getuid())) {
+	if (setuid(uid)) {
 		perror("setuid");
 		return EXIT_CANNOT;
 	}
@@ -168,7 +248,7 @@ int main(int argc, char *argv[])
 	if (pid == -1) {
 		fprintf(stderr, "fork(): %s\n", strerror(errno));
 	} else if (pid == 0) {
-		return child(argv[1], newroot, argv+3);
+		return child(argv[1], newroot, rundir, argv+3);
 	} else {
 		int status;
 		if (-1 == waitpid(pid, &status, 0)) {
