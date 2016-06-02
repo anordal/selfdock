@@ -1,0 +1,12 @@
+To be wrapped:
+* nsenter -t <selfdock pid>
+* kill <selfdock pid> # needs to handle SIGTERM to clean up the directory
+
+Detect sudo, print advice and fail, but --allow-running-under-sudo
+
+Volumes (bind mounts) of course, but NFS mounts too!
+
+autonames:
+    Sigurd Storblåsar
+    Gisle Gangsperr
+    Vilde Vonbråten
