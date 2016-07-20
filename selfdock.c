@@ -129,7 +129,11 @@ static int mount_bind(const char* lower, const char* upper, const char* dst)
 	return 0;
 
 fail:
-	fprintf(stderr, "bindmount «%s» → «%s»: %s\n", lower, dst, errmsg);
+	if (upper) {
+		fprintf(stderr, "bindmount «%s» + «%s» → «%s»: %s\n", lower, upper, dst, errmsg);
+	} else {
+		fprintf(stderr, "bindmount «%s» → «%s»: %s\n", lower, dst, errmsg);
+	}
 	return -1;
 }
 
@@ -188,6 +192,8 @@ static int tmpfs_mkdir(const char *path, int flag, const char *opt)
 
 static int child(
 	const char *oldroot, const char *newroot,
+	struct narg_optparam *map,
+	struct narg_optparam *vol,
 	const char *rundir, char *const argv[])
 {
 	// CLONE_NEWNS must be applied in the child process
@@ -221,6 +227,26 @@ static int child(
 
 	if (already_readonly) {
 		if (mount_bind(TOSTRING(ROOTOVERLAY) "/dev", NULL, "dev")) {
+			return EXIT_CANNOT;
+		}
+	}
+
+	for (unsigned i=0; i < map->paramc; i += 2) {
+		if (mount_bind(
+			map->paramv[i],
+			TOSTRING(ROOTOVERLAY) "/dev/empty",
+			map->paramv[i+1]+1))
+		{
+			return EXIT_CANNOT;
+		}
+	}
+
+	for (unsigned i=0; i < vol->paramc; i += 2) {
+		if (mount_bind(
+			vol->paramv[i],
+			NULL,
+			vol->paramv[i+1]+1))
+		{
 			return EXIT_CANNOT;
 		}
 	}
@@ -289,17 +315,23 @@ int main(int argc, char *argv[])
 	enum {
 		OPT_HELP,
 		OPT_ROOT,
+		OPT_MAP,
+		OPT_VOL,
 		OPT_IGN,
 		OPT_MAX
 	};
 	static const struct narg_optspec optv[OPT_MAX] = {
 		{"h","help",NULL,"Show help text"},
 		{"r","root"," DIR","Directory to use as root filesystem"},
+		{"m","map"," SRC DST","Mount SRC to DST read-only"},
+		{"v","vol"," SRC DST","Mount SRC to DST read-write"},
 		{NULL,"",&narg_metavar.ignore_rest,"Don\'t interpret further arguments as options"}
 	};
 	struct narg_optparam ansv[OPT_MAX] = {
 		[OPT_HELP] = {0, NULL},
 		[OPT_ROOT] = {1, (const char*[]){"/"}},
+		[OPT_MAP] = {0, NULL},
+		[OPT_VOL] = {0, NULL},
 		[OPT_IGN] = {0, NULL}
 	};
 	struct narg_result nargres = narg_findopt(argv, optv, ansv, OPT_MAX, 1, 2);
@@ -312,6 +344,21 @@ int main(int argc, char *argv[])
 		ansv[OPT_HELP].paramc = 0;
 		help(optv, ansv, OPT_MAX);
 		return EXIT_SUCCESS;
+	}
+
+	for (unsigned i=0; i < ansv[OPT_MAP].paramc; i += 2) {
+		if (ansv[OPT_MAP].paramv[i+1][0] != '/')
+		{
+			fprintf(stderr, "%s destinations must be absolute\n", "--map");
+			return EXIT_CANNOT;
+		}
+	}
+	for (unsigned i=0; i < ansv[OPT_VOL].paramc; i += 2) {
+		if (ansv[OPT_VOL].paramv[i+1][0] != '/')
+		{
+			fprintf(stderr, "%s destinations must be absolute\n", "--vol");
+			return EXIT_CANNOT;
+		}
 	}
 
 	if (argc - nargres.arg < 2) {
@@ -357,7 +404,7 @@ int main(int argc, char *argv[])
 	if (pid == -1) {
 		fprintf(stderr, "fork(): %s\n", strerror(errno));
 	} else if (pid == 0) {
-		return child(ansv[OPT_ROOT].paramv[0], newroot, rundir, argv);
+		return child(ansv[OPT_ROOT].paramv[0], newroot, ansv+OPT_MAP, ansv+OPT_VOL, rundir, argv);
 	} else {
 		int status;
 		if (-1 == waitpid(pid, &status, 0)) {

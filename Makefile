@@ -17,9 +17,9 @@ DEVFILES =\
 .PHONY: install
 install: $(PREFIX)/bin/selfdock | $(DEVFILES)
 
-$(DEV):
+$(DEV)/empty:
 	install -d -m555 $@
-$(DEV)/% : /dev/% | $(DEV)
+$(DEV)/% : /dev/% | $(DEV)/empty
 	cp -a $^ $@
 
 MODULETESTS=$(wildcard moduletest/*)

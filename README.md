@@ -1,30 +1,45 @@
 # selfdock
-Provides process- and filesystem isolation for a process and its children.
+A sandbox for process and filesystem isolation, like Docker, but without its hard problems:
+Doesn't give you root, isn't slow at spawning and tearing down containers, can use the host's root filesystem as an image, and can run within itself.
 
-Alternative to Docker, similar in spirit to Rocket, but less ambitious.
+## Principles
+### Stateless instances
+Give up the idea of *data volume containers*. Given that *volumes* are the way to go,
+no other filesystems in the container need to, or should be, writable. So forbid state in containers and exploit the advantages:
+* No risk of deleting anything useful: Stateless containers can be cleaned up without asking. Because the user won't be thinking in containers, they will be called *instances* instead.
+* No disk writes: There is no write backing or anything to copy/delete on spawn/teardown. I can spawn >200 instances per second on my slow laptop, which is over 100 times faster than Docker. Microscaling, yay!
+* Memory friendly, sharing immutable state between instances of the same image.
 
-## Motivation
+It is intended that in a special *build* mode, the root filesystem will be writable, but that's for building the root filesystem.
+
 ### No privilege escalation
-Your `uid` and privileges is the same within the container (thus the name). Selfdock is a suid executable, but drops its privileges prior to invoking the target program. The idea is that voluntarily jailing oneself should not require privileges.
+With support for volumes, it is important that your `uid` and privileges are the same within the container. Selfock enforces this, thus the name. With Docker, you become root inside the container, which is why only root can safely be allowed to use it - adding users to the `docker` group is really like giving them the root password! Selfdock is a suid executable, but drops its privileges prior to invoking the target program. The idea is that voluntarily jailing oneself should not require privileges.
 
-With Docker, users need to be privileged to run it, because it lets users both map the host filesystem into the container, and be root inside the container. So if you let users run Docker on your server, you might just as well give them the root password.
+### No daemon
+The daemon is what complicates docker in docker. To be avoided if possible.
 
-### Image instances, not containers
-Docker containers are stateful, the user needs to manage them, and their creation/deletion takes quite some disk IO.
-All this is unnecessary given that users are better off having state elsewhere anyway (such as a volume).
+## Usage examples
 
-With Selfdock, the on-disk format of an image instance is a readonly overlayfs mounted in tmpfs, sharing immutable state between instances of the same image. Memory friendly and doesn't even touch the harddisk. I can spawn >200 instances per second on my slow laptop. That's a couple of magnitudes faster than Docker. Microscaling, yay!
+    selfdock run sh
 
-## Usage example
-From `/` (yes, using the root filesystem as an image), create a jail instance named `label` and run `sh`:
+    selfdock -v /mnt/data /mnt/data run sh
 
-    selfdock / label sh
+    selfdock --root /mnt/debian run sh
+
+## Dependencies
+* [narg](https://github.com/anordal/narg)
 
 ## Compile & install
 
     make
     sudo make install
 
+### Run tests
+
+Note: Tests *the installed* program (because Selfdock is a suid program, it won't work before it is installed):
+
+    make -j test
+
 ## To do
-* Support volumes (and consider security implications of combining this with that suid thing).
-* Find a way to enter an image instance. Extend syntax for that.
+* selfdock enter
+* selfdock build
