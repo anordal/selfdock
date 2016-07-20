@@ -1,7 +1,8 @@
-#!/bin/bash -e
+#!/bin/bash
+set -e
 test "$XDG_RUNTIME_DIR" = '' && XDG_RUNTIME_DIR=/tmp
 
-s=( selfdock / "$1" )
+s=( selfdock run )
 s4=( "${s[@]}" "${s[@]}" "${s[@]}" "${s[@]}" )
 s16=( "${s4[@]}" "${s4[@]}" "${s4[@]}" "${s4[@]}" )
 

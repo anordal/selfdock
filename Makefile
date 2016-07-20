@@ -1,6 +1,7 @@
 PREFIX ?= /usr/local
 ROOTOVERLAY ?= $(PREFIX)/share/selfdock
 CFLAGS = -std=gnu99 -Wall -Wextra -Wpedantic -Os -DROOTOVERLAY=$(ROOTOVERLAY)
+LDFLAGS = $(shell pkg-config --libs narg)
 
 selfdock : selfdock.c
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@
@@ -11,6 +12,7 @@ $(PREFIX)/bin/selfdock : selfdock
 DEV = $(ROOTOVERLAY)/dev
 DEVFILES =\
 	$(DEV)/null\
+	$(DEV)/random\
 
 .PHONY: install
 install: $(PREFIX)/bin/selfdock | $(DEVFILES)
@@ -24,4 +26,4 @@ MODULETESTS=$(wildcard moduletest/*)
 .PHONY: test $(MODULETESTS)
 test: $(MODULETESTS)
 $(MODULETESTS):
-	$@ $(subst /,_,$@)
+	$@

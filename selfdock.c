@@ -8,6 +8,8 @@
  */
 
 #define _GNU_SOURCE
+#include <narg.h>
+#include <libintl.h>
 #include <sched.h> //unshare
 #include <errno.h>
 #include <fcntl.h> //open
@@ -36,15 +38,62 @@
 #define EXIT_CMDNOTEXEC  126 //applicable convention
 #define EXIT_CMDNOTFOUND 127 //applicable convention
 
+#ifndef NO_REINVENT_MKDTEMP
+#	define mkdtemp(x) selfdock_mkdtemp(x)
+// Workaround for selfdock-in-selfdock – if you are affected, the tests won't
+// pass. Looks like a combination of unshare() and mkdtemp() triggers a glibc
+// assertion in fork():
+//
+// ../sysdeps/nptl/fork.c:141: __libc_fork: Assertion
+// `THREAD_GETMEM (self, tid) != ppid' failed.
+//
+// Looks related to:
+// https://lists.linuxcontainers.org/pipermail/lxc-devel/2013-April/004156.html
+//
+static char *selfdock_mkdtemp(char *path) {
+	int fd = open("/dev/random", O_RDONLY);
+	if (fd == -1) {
+		goto fail_random;
+	}
+
+	uint32_t entropy;
+	if (read(fd, &entropy, sizeof(entropy)) != sizeof(entropy)) {
+		close(fd);
+		goto fail_random;
+	}
+	close(fd);
+
+	char *apply_entropy = path + strlen(path) - 6; // mkdtemp spec
+	for (uint32_t giveup = entropy + 1000; ; ++entropy) {
+		// simplified Base64
+		for (int i=0; i<6; ++i) {
+			apply_entropy[i] = 63 + ((entropy >> (6*i)) & 0x3F);
+		}
+		if (0 == mkdir(path, 0700)) {
+			return path; // success
+		}
+		if (errno == EEXIST && entropy != giveup) {
+			continue;
+		}
+		goto fail;
+	}
+
+fail_random:
+	strcpy(path, "/dev/random");
+fail:
+	return NULL;
+}
+#endif // NO_REINVENT_MKDTEMP
+
 // Drop euid privileges temporarily for the directory creation.
 // It would be a security problem to expose directory creation
 // with elevated privileges if the user can influence the path.
-static int mkdir_as_realuser(const char *path, int mode)
+static int mkdir_as_realuser(char *path)
 {
 	uid_t effective = geteuid();
 	if (seteuid(getuid())) return -1;
 
-	int ret = mkdir(path, mode);
+	int ret = (NULL != mkdtemp(path)) ? 0 : -1;
 
 	if (seteuid(effective)) return -1;
 	return ret;
@@ -218,12 +267,66 @@ static int child(
 	}
 }
 
+const char *narg_strerror(unsigned err) {
+	switch (err) {
+		case NARG_ENOSUCHOPTION: return "No such option";
+		case NARG_EMISSINGPARAM: return "Missing parameter";
+		case NARG_EUNEXPECTEDPARAM: return "Unexpected parameter";
+		case NARG_EILSEQ: return strerror(EILSEQ);
+	}
+	return "Unknown error";
+}
+
+void help(const struct narg_optspec *optv, struct narg_optparam *ansv, unsigned optc) {
+	unsigned width = narg_terminalwidth(stdout);
+	flockfile(stdout);
+	narg_printopt_unlocked(stdout, width, optv, ansv, optc, dgettext, NULL, 2);
+	funlockfile(stdout);
+}
+
 int main(int argc, char *argv[])
 {
-	if (argc < 4) {
-		printf("Usage: %s rootdir label argv\n", argv[0]);
+	enum {
+		OPT_HELP,
+		OPT_ROOT,
+		OPT_IGN,
+		OPT_MAX
+	};
+	static const struct narg_optspec optv[OPT_MAX] = {
+		{"h","help",NULL,"Show help text"},
+		{"r","root"," DIR","Directory to use as root filesystem"},
+		{NULL,"",&narg_metavar.ignore_rest,"Don\'t interpret further arguments as options"}
+	};
+	struct narg_optparam ansv[OPT_MAX] = {
+		[OPT_HELP] = {0, NULL},
+		[OPT_ROOT] = {1, (const char*[]){"/"}},
+		[OPT_IGN] = {0, NULL}
+	};
+	struct narg_result nargres = narg_findopt(argv, optv, ansv, OPT_MAX, 1, 2);
+	if (nargres.err) {
+		fprintf(stderr, "%s: %s\n", argv[nargres.arg], narg_strerror(nargres.err));
 		return EXIT_CANNOT;
 	}
+
+	if (ansv[OPT_HELP].paramc) {
+		ansv[OPT_HELP].paramc = 0;
+		help(optv, ansv, OPT_MAX);
+		return EXIT_SUCCESS;
+	}
+
+	if (argc - nargres.arg < 2) {
+		printf(
+			"Usage: %s [OPTIONS] run argv\n"
+			"       %s run [OPTIONS] -- argv\n"
+			, argv[0], argv[0]);
+		return EXIT_CANNOT;
+	}
+	argv += nargres.arg;
+	if (0 != strcmp(argv[0], "run")) {
+		fputs("Action must be \"run\" for now. TODO: build|enter\n", stderr);
+		return EXIT_CANNOT;
+	}
+	argv += 1;
 
 	// CLONE_NEWPID must be applied in the parent process
 	if (unshare(CLONE_NEWPID)) {
@@ -236,13 +339,13 @@ int main(int argc, char *argv[])
 		fputs("Please set XDG_RUNTIME_DIR.\n", stderr);
 		return EXIT_CANNOT;
 	}
-	char newroot[64]; //who wants long labels
-	if (sizeof(newroot) <= (size_t)snprintf(newroot, sizeof(newroot), "%s/%s", rundir, argv[2])) {
-		fprintf(stderr, "%s/%s: %s\n", rundir, argv[2], strerror(ENAMETOOLONG));
+	char newroot[48];
+	if (sizeof(newroot) <= (size_t)snprintf(newroot, sizeof(newroot), "%s/selfdock_XXXXXX", rundir)) {
+		fprintf(stderr, "%s/selfdock_XXXXXX: %s\n", rundir, strerror(ENAMETOOLONG));
 		return EXIT_CANNOT;
 	}
 
-	if (mkdir_as_realuser(newroot, 0x777)) {
+	if (mkdir_as_realuser(newroot)) {
 		perror(newroot);
 		return (errno == EEXIST)
 			? EXIT_NAME_IN_USE
@@ -254,7 +357,7 @@ int main(int argc, char *argv[])
 	if (pid == -1) {
 		fprintf(stderr, "fork(): %s\n", strerror(errno));
 	} else if (pid == 0) {
-		return child(argv[1], newroot, rundir, argv+3);
+		return child(ansv[OPT_ROOT].paramv[0], newroot, rundir, argv);
 	} else {
 		int status;
 		if (-1 == waitpid(pid, &status, 0)) {
