@@ -1,17 +1,24 @@
+PREFIX ?= /usr/local
+ROOTOVERLAY ?= $(PREFIX)/share/selfdock
+CFLAGS = -std=gnu99 -Wall -Wextra -Wpedantic -Os -DROOTOVERLAY=$(ROOTOVERLAY)
+
 selfdock : selfdock.c
-	$(CC) -std=gnu99 $^ -o $@
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@
+
+$(PREFIX)/bin/selfdock : selfdock
+	install -o root -g root -m 4111 $^ $@
+
+DEV = $(ROOTOVERLAY)/dev
+DEVFILES =\
+	$(DEV)/null\
 
 .PHONY: install
-install: /usr/local/bin/selfdock | /usr/local/share/selfdock/dev/null
+install: $(PREFIX)/bin/selfdock | $(DEVFILES)
 
-/usr/local/bin/selfdock : selfdock
-	install -o root -g root -m 4111 $^ /usr/local/bin/
-
-/usr/local/share/selfdock/dev/null:
-	mkdir -p /usr/local/share/selfdock/dev
-	mknod $@_tmp c 1 3
-	chmod 666 $@_tmp
-	mv $@_tmp $@
+$(DEV):
+	install -d -m555 $@
+$(DEV)/% : /dev/% | $(DEV)
+	cp -a $^ $@
 
 MODULETESTS=$(wildcard moduletest/*)
 .PHONY: test $(MODULETESTS)

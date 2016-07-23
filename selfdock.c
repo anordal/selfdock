@@ -19,8 +19,14 @@
 #include <stdio.h>
 #include <string.h>
 
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+
 #ifndef PATH_MAX
 #	define PATH_MAX 1024
+#endif
+#ifndef ROOTOVERLAY
+#	error ROOTOVERLAY not defined
 #endif
 
 // Try to conform or give way to existing exit status conventions
@@ -153,7 +159,7 @@ static int child(
 
 	if (mount_bind(
 		oldroot,
-		already_readonly ? NULL : "/usr/local/share/selfdock",
+		already_readonly ? NULL : TOSTRING(ROOTOVERLAY),
 		newroot))
 	{
 		return EXIT_CANNOT;
@@ -165,7 +171,7 @@ static int child(
 	}
 
 	if (already_readonly) {
-		if (mount_bind("/usr/local/share/selfdock/dev", NULL, "dev")) {
+		if (mount_bind(TOSTRING(ROOTOVERLAY) "/dev", NULL, "dev")) {
 			return EXIT_CANNOT;
 		}
 	}
@@ -231,7 +237,7 @@ int main(int argc, char *argv[])
 		return EXIT_CANNOT;
 	}
 	char newroot[64]; //who wants long labels
-	if (sizeof(newroot) <= snprintf(newroot, sizeof(newroot), "%s/%s", rundir, argv[2])) {
+	if (sizeof(newroot) <= (size_t)snprintf(newroot, sizeof(newroot), "%s/%s", rundir, argv[2])) {
 		fprintf(stderr, "%s/%s: %s\n", rundir, argv[2], strerror(ENAMETOOLONG));
 		return EXIT_CANNOT;
 	}
