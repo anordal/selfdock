@@ -10,7 +10,7 @@
 #define _GNU_SOURCE
 #include <narg.h>
 #include <libintl.h>
-#include <sched.h> //unshare
+#include <sched.h> //clone
 #include <errno.h>
 #include <fcntl.h> //open
 #include <sys/stat.h> //mkdir
@@ -20,6 +20,7 @@
 #include <stdlib.h> //getenv
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h> //mmap
 
 #define STRINGIFY(x) #x
 #define TOSTRING(x) STRINGIFY(x)
@@ -38,53 +39,6 @@
 #define EXIT_CMDNOTEXEC  126 //applicable convention
 #define EXIT_CMDNOTFOUND 127 //applicable convention
 
-#ifndef NO_REINVENT_MKDTEMP
-#	define mkdtemp(x) selfdock_mkdtemp(x)
-// Workaround for selfdock-in-selfdock – if you are affected, the tests won't
-// pass. Looks like a combination of unshare() and mkdtemp() triggers a glibc
-// assertion in fork():
-//
-// ../sysdeps/nptl/fork.c:141: __libc_fork: Assertion
-// `THREAD_GETMEM (self, tid) != ppid' failed.
-//
-// Looks related to:
-// https://lists.linuxcontainers.org/pipermail/lxc-devel/2013-April/004156.html
-//
-static char *selfdock_mkdtemp(char *path) {
-	int fd = open("/dev/random", O_RDONLY);
-	if (fd == -1) {
-		goto fail_random;
-	}
-
-	uint32_t entropy;
-	if (read(fd, &entropy, sizeof(entropy)) != sizeof(entropy)) {
-		close(fd);
-		goto fail_random;
-	}
-	close(fd);
-
-	char *apply_entropy = path + strlen(path) - 6; // mkdtemp spec
-	for (uint32_t giveup = entropy + 1000; ; ++entropy) {
-		// simplified Base64
-		for (int i=0; i<6; ++i) {
-			apply_entropy[i] = 63 + ((entropy >> (6*i)) & 0x3F);
-		}
-		if (0 == mkdir(path, 0700)) {
-			return path; // success
-		}
-		if (errno == EEXIST && entropy != giveup) {
-			continue;
-		}
-		goto fail;
-	}
-
-fail_random:
-	strcpy(path, "/dev/random");
-fail:
-	return NULL;
-}
-#endif // NO_REINVENT_MKDTEMP
-
 // Drop euid privileges temporarily for the directory creation.
 // It would be a security problem to expose directory creation
 // with elevated privileges if the user can influence the path.
@@ -93,7 +47,7 @@ static int mkdir_as_realuser(char *path)
 	uid_t effective = geteuid();
 	if (seteuid(getuid())) return -1;
 
-	int ret = (NULL != mkdtemp(path)) ? 0 : -1;
+	int ret = mkdir(path, 0700);
 
 	if (seteuid(effective)) return -1;
 	return ret;
@@ -190,17 +144,17 @@ static int tmpfs_mkdir(const char *path, int flag, const char *opt)
 	return tmpfs_mkdir_dirname(dirname, &statbuf, flag, opt);
 }
 
-static int child(
-	const char *oldroot, const char *newroot,
-	struct narg_optparam *map,
-	struct narg_optparam *vol,
-	const char *rundir, char *const argv[])
+struct child_args {
+	char newroot[48];
+	const char *oldroot;
+	struct narg_optparam *map, *vol;
+	const char *rundir;
+	char *const *argv;
+};
+static int child(void *arg)
 {
-	// CLONE_NEWNS must be applied in the child process
-	if (unshare(CLONE_NEWNS)) {
-		perror("unshare");
-		return EXIT_CANNOT;
-	}
+	const struct child_args *self = arg;
+
 	// The containing mountpoint must be marked private. How this is supposed
 	// to be done is AFAIK undocumented, but this trick, recursing from root,
 	// was taken from http://sourceforge.net/p/fuse/mailman/message/24957287/
@@ -210,18 +164,18 @@ static int child(
 	}
 
 	// Use overlayfs sparingly; it has a maximum stacking depth.
-	_Bool already_readonly = is_readonly_rootfs(oldroot);
+	_Bool already_readonly = is_readonly_rootfs(self->oldroot);
 
 	if (mount_bind(
-		oldroot,
+		self->oldroot,
 		already_readonly ? NULL : TOSTRING(ROOTOVERLAY),
-		newroot))
+		self->newroot))
 	{
 		return EXIT_CANNOT;
 	}
 
-	if (chdir(newroot)) {
-		fprintf(stderr, "chdir(%s): %s\n", newroot, strerror(errno));
+	if (chdir(self->newroot)) {
+		fprintf(stderr, "chdir(%s): %s\n", self->newroot, strerror(errno));
 		return EXIT_CANNOT;
 	}
 
@@ -231,28 +185,28 @@ static int child(
 		}
 	}
 
-	for (unsigned i=0; i < map->paramc; i += 2) {
+	for (unsigned i=0; i < self->map->paramc; i += 2) {
 		if (mount_bind(
-			map->paramv[i],
+			self->map->paramv[i],
 			TOSTRING(ROOTOVERLAY) "/dev/empty",
-			map->paramv[i+1]+1))
+			self->map->paramv[i+1]+1))
 		{
 			return EXIT_CANNOT;
 		}
 	}
 
-	for (unsigned i=0; i < vol->paramc; i += 2) {
+	for (unsigned i=0; i < self->vol->paramc; i += 2) {
 		if (mount_bind(
-			vol->paramv[i],
+			self->vol->paramv[i],
 			NULL,
-			vol->paramv[i+1]+1))
+			self->vol->paramv[i+1]+1))
 		{
 			return EXIT_CANNOT;
 		}
 	}
 
 	if (chroot(".")) {
-		fprintf(stderr, "chroot(%s): %s\n", newroot, strerror(errno));
+		fprintf(stderr, "chroot(%s): %s\n", self->newroot, strerror(errno));
 		return EXIT_CANNOT;
 	}
 
@@ -261,13 +215,13 @@ static int child(
 		return EXIT_CANNOT;
 	}
 
-	if (tmpfs_mkdir(rundir, MS_NOEXEC, "size=2M")) {
-		perror(rundir);
+	if (tmpfs_mkdir(self->rundir, MS_NOEXEC, "size=2M")) {
+		perror(self->rundir);
 		return EXIT_CANNOT;
 	}
 	uid_t uid = getuid();
-	if (chown(rundir, uid, -1)) {
-		perror(rundir);
+	if (chown(self->rundir, uid, -1)) {
+		perror(self->rundir);
 		return EXIT_CANNOT;
 	}
 
@@ -277,11 +231,11 @@ static int child(
 		return EXIT_CANNOT;
 	}
 
-	execvp(argv[0], argv);
+	execvp(self->argv[0], self->argv);
 
 	// fail
 	int errval = errno;
-	fprintf(stderr, "exec(%s): %s\n", argv[0], strerror(errval));
+	fprintf(stderr, "exec(%s): %s\n", self->argv[0], strerror(errval));
 	switch(errval) {
 		case ELOOP:
 		case ENAMETOOLONG:
@@ -375,39 +329,60 @@ int main(int argc, char *argv[])
 	}
 	argv += 1;
 
-	// CLONE_NEWPID must be applied in the parent process
-	if (unshare(CLONE_NEWPID)) {
-		perror("unshare");
+	const unsigned initial_stack_size = 4096;
+	char *stack = mmap(
+		NULL, initial_stack_size,
+		PROT_READ|PROT_WRITE,
+		MAP_PRIVATE|MAP_GROWSDOWN|MAP_ANONYMOUS,
+		-1, 0
+	);
+	if (stack == MAP_FAILED) {
+		perror("mmap");
 		return EXIT_CANNOT;
 	}
 
-	const char *rundir = getenv("XDG_RUNTIME_DIR");
-	if (!rundir) {
+	struct child_args barnebok;
+	barnebok.oldroot = ansv[OPT_ROOT].paramv[0];
+	barnebok.map = ansv+OPT_MAP;
+	barnebok.vol = ansv+OPT_VOL;
+	barnebok.argv = argv;
+
+	barnebok.rundir = getenv("XDG_RUNTIME_DIR");
+	if (!barnebok.rundir) {
 		fputs("Please set XDG_RUNTIME_DIR.\n", stderr);
 		return EXIT_CANNOT;
 	}
-	char newroot[48];
-	if (sizeof(newroot) <= (size_t)snprintf(newroot, sizeof(newroot), "%s/selfdock_XXXXXX", rundir)) {
-		fprintf(stderr, "%s/selfdock_XXXXXX: %s\n", rundir, strerror(ENAMETOOLONG));
+	pid_t pid = getpid();
+	if (sizeof(barnebok.newroot) <= (size_t)snprintf(
+		barnebok.newroot, sizeof(barnebok.newroot),
+		"%s/pid_0x%lx", barnebok.rundir, (long)pid
+	)) {
+		fprintf(stderr, "%s/pid_0x%lx: %s\n"
+			, barnebok.rundir
+			, (long)pid
+			, strerror(ENAMETOOLONG)
+		);
 		return EXIT_CANNOT;
 	}
 
-	if (mkdir_as_realuser(newroot)) {
-		perror(newroot);
+	if (mkdir_as_realuser(barnebok.newroot)) {
+		perror(barnebok.newroot);
 		return (errno == EEXIST)
 			? EXIT_NAME_IN_USE
 			: EXIT_CANNOT;
 	}
 
 	int ret = EXIT_CANNOT;
-	pid_t pid = fork();
+	pid = clone(
+		child, stack + initial_stack_size,
+		CLONE_VFORK|CLONE_VM|CLONE_NEWNS|CLONE_NEWPID|SIGCHLD,
+		&barnebok
+	);
 	if (pid == -1) {
-		fprintf(stderr, "fork(): %s\n", strerror(errno));
-	} else if (pid == 0) {
-		return child(ansv[OPT_ROOT].paramv[0], newroot, ansv+OPT_MAP, ansv+OPT_VOL, rundir, argv);
+		fprintf(stderr, "clone(): %s\n", strerror(errno));
 	} else {
 		int status;
-		if (-1 == waitpid(pid, &status, 0)) {
+		if (-1 == wait(&status)) {
 			perror("wait");
 		} else if (WIFEXITED(status)) {
 			ret = WEXITSTATUS(status);
@@ -415,8 +390,8 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "%s: killed by signal %d\n", argv[0], WTERMSIG(status));
 		}
 	}
-	if (rmdir(newroot)) {
-		perror(newroot);
+	if (rmdir(barnebok.newroot)) {
+		perror(barnebok.newroot);
 	}
 	return ret;
 }
