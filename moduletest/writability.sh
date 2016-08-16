@@ -2,7 +2,7 @@
 set -e
 test "$XDG_RUNTIME_DIR" = '' && XDG_RUNTIME_DIR=/tmp
 
-s=( selfdock run )
+s=( "$1" run )
 s4=( "${s[@]}" "${s[@]}" "${s[@]}" "${s[@]}" )
 s16=( "${s4[@]}" "${s4[@]}" "${s4[@]}" "${s4[@]}" )
 

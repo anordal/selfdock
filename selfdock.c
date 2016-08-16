@@ -39,6 +39,19 @@
 #define EXIT_CMDNOTEXEC  126 //applicable convention
 #define EXIT_CMDNOTFOUND 127 //applicable convention
 
+static _Bool is_suid(const char *path)
+{
+	struct stat info;
+	return 0 == stat(path, &info) && info.st_mode & S_ISUID;
+}
+
+// is what execvp calls a pathname && exists && is (a symlink to) a directory
+static _Bool isdir_pathname(const char *path)
+{
+	struct stat info;
+	return strchr(path, '/') && 0 == lstat(path, &info) && S_ISDIR(info.st_mode);
+}
+
 // Drop euid privileges temporarily for the directory creation.
 // It would be a security problem to expose directory creation
 // with elevated privileges if the user can influence the path.
@@ -175,7 +188,7 @@ static int child(void *arg)
 	}
 
 	if (chdir(self->newroot)) {
-		fprintf(stderr, "chdir(%s): %s\n", self->newroot, strerror(errno));
+		fprintf(stderr, "chdir: %s: %s\n", self->newroot, strerror(errno));
 		return EXIT_CANNOT;
 	}
 
@@ -206,7 +219,7 @@ static int child(void *arg)
 	}
 
 	if (chroot(".")) {
-		fprintf(stderr, "chroot(%s): %s\n", self->newroot, strerror(errno));
+		fprintf(stderr, "chroot: %s: %s\n", self->newroot, strerror(errno));
 		return EXIT_CANNOT;
 	}
 
@@ -235,7 +248,10 @@ static int child(void *arg)
 
 	// fail
 	int errval = errno;
-	fprintf(stderr, "exec(%s): %s\n", self->argv[0], strerror(errval));
+	if (errval == EACCES && isdir_pathname(self->argv[0])) {
+		errval = EISDIR;
+	}
+	fprintf(stderr, "exec: %s: %s\n", self->argv[0], strerror(errval));
 	switch(errval) {
 		case ELOOP:
 		case ENAMETOOLONG:
@@ -322,12 +338,10 @@ int main(int argc, char *argv[])
 			, argv[0], argv[0]);
 		return EXIT_CANNOT;
 	}
-	argv += nargres.arg;
-	if (0 != strcmp(argv[0], "run")) {
+	if (0 != strcmp(argv[nargres.arg], "run")) {
 		fputs("Action must be \"run\" for now. TODO: build|enter\n", stderr);
 		return EXIT_CANNOT;
 	}
-	argv += 1;
 
 	const unsigned initial_stack_size = 4096;
 	char *stack = mmap(
@@ -345,11 +359,16 @@ int main(int argc, char *argv[])
 	barnebok.oldroot = ansv[OPT_ROOT].paramv[0];
 	barnebok.map = ansv+OPT_MAP;
 	barnebok.vol = ansv+OPT_VOL;
-	barnebok.argv = argv;
+	barnebok.argv = argv + nargres.arg + 1; // += optional + positional args
 
 	barnebok.rundir = getenv("XDG_RUNTIME_DIR");
 	if (!barnebok.rundir) {
-		fputs("Please set XDG_RUNTIME_DIR.\n", stderr);
+		// This can be caused by sudo.
+		// If not (correctly) installed as a suid program,
+		// clone will fail with EPERM, which
+		// without the suid hint,
+		// users will interpret as "try sudo" and get here.
+		fputs("Please set XDG_RUNTIME_DIR to your temporary directory of choice.\n", stderr);
 		return EXIT_CANNOT;
 	}
 	pid_t pid = getpid();
@@ -379,7 +398,11 @@ int main(int argc, char *argv[])
 		&barnebok
 	);
 	if (pid == -1) {
-		fprintf(stderr, "clone(): %s\n", strerror(errno));
+		if (!is_suid(argv[0])) {
+			fprintf(stderr, "No suid. Please check that the program is installed correctly.\n");
+		} else {
+			fprintf(stderr, "clone: %s\n", strerror(errno));
+		}
 	} else {
 		int status;
 		if (-1 == wait(&status)) {
@@ -387,7 +410,7 @@ int main(int argc, char *argv[])
 		} else if (WIFEXITED(status)) {
 			ret = WEXITSTATUS(status);
 		} else if (WIFSIGNALED(status)) {
-			fprintf(stderr, "%s: killed by signal %d\n", argv[0], WTERMSIG(status));
+			psignal(WTERMSIG(status), barnebok.argv[0]);
 		}
 	}
 	if (rmdir(barnebok.newroot)) {
