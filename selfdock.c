@@ -160,6 +160,7 @@ static int tmpfs_mkdir(const char *path, int flag, const char *opt)
 struct child_args {
 	char newroot[48];
 	const char *oldroot;
+	const char *cd;
 	struct narg_optparam *map, *vol;
 	const char *rundir;
 	char *const *argv;
@@ -244,6 +245,11 @@ static int child(void *arg)
 		return EXIT_CANNOT;
 	}
 
+	if (chdir(self->cd)) {
+		perror(self->cd);
+		return EXIT_CANNOT;
+	}
+
 	execvp(self->argv[0], self->argv);
 
 	// fail
@@ -285,6 +291,7 @@ int main(int argc, char *argv[])
 	enum {
 		OPT_HELP,
 		OPT_ROOT,
+		OPT_CD,
 		OPT_MAP,
 		OPT_VOL,
 		OPT_IGN,
@@ -293,6 +300,7 @@ int main(int argc, char *argv[])
 	static const struct narg_optspec optv[OPT_MAX] = {
 		{"h","help",NULL,"Show help text"},
 		{"r","root"," DIR","Directory to use as root filesystem"},
+		{"C", NULL, " DIR","Working directory"},
 		{"m","map"," SRC DST","Mount SRC to DST read-only"},
 		{"v","vol"," SRC DST","Mount SRC to DST read-write"},
 		{NULL,"",&narg_metavar.ignore_rest,"Don\'t interpret further arguments as options"}
@@ -300,6 +308,7 @@ int main(int argc, char *argv[])
 	struct narg_optparam ansv[OPT_MAX] = {
 		[OPT_HELP] = {0, NULL},
 		[OPT_ROOT] = {1, (const char*[]){"/"}},
+		[OPT_CD ] = {1, (const char*[]){"/"}},
 		[OPT_MAP] = {0, NULL},
 		[OPT_VOL] = {0, NULL},
 		[OPT_IGN] = {0, NULL}
@@ -357,6 +366,7 @@ int main(int argc, char *argv[])
 
 	struct child_args barnebok;
 	barnebok.oldroot = ansv[OPT_ROOT].paramv[0];
+	barnebok.cd  = ansv[OPT_CD].paramv[0];
 	barnebok.map = ansv+OPT_MAP;
 	barnebok.vol = ansv+OPT_VOL;
 	barnebok.argv = argv + nargres.arg + 1; // += optional + positional args
