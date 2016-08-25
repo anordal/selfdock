@@ -1,7 +1,8 @@
 # selfdock
 A sandbox for process and filesystem isolation, like Docker, but without its hard problems:
-Doesn't give you root,
-isn't slow at tearing down containers,
+Doesn't give or require root,
+cleans up used containers after itself,
+without being slow at that,
 can run off the host's root filesystem,
 and can run within itself.
 
@@ -63,6 +64,8 @@ The daemon is what complicates docker in docker.
     cd    /tmp/build-selfdock
     ninja
     sudo ninja install
+
+Replace meson with meson.py if you installed it via `pip3 install meson`.
 
 ### Run tests
 

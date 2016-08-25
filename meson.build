@@ -1,4 +1,5 @@
 project('selfdock', 'c',
+	meson_version: '>=0.33.0',
 	default_options: ['c_std=gnu99', 'warning_level=3'],
 	license: 'MPL 2.0'
 )
