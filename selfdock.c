@@ -224,8 +224,13 @@ static int child(void *arg)
 		return EXIT_CANNOT;
 	}
 
-	if (mount("none", "proc", "proc", MS_RDONLY|MS_NOEXEC, NULL)) {
+	if (mount("none", "proc", "proc", MS_NOEXEC, NULL)) {
 		perror("mount proc");
+		return EXIT_CANNOT;
+	}
+
+	if (mount("none", "dev/pts", "devpts", MS_NOEXEC, NULL)) {
+		perror("mount devpts");
 		return EXIT_CANNOT;
 	}
 

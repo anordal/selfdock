@@ -7,9 +7,12 @@ DEV = $(ROOTOVERLAY)/dev
 DEVFILES =\
 	$(DEV)/null\
 	$(DEV)/random\
+	$(DEV)/urandom\
+	$(DEV)/ptmx\
 
 DIRS =\
 	$(DEV)/empty\
+	$(DEV)/pts\
 	$(PREFIX)/bin\
 	$(ROOTOVERLAY)/proc\
 	$(ROOTOVERLAY)/run\
