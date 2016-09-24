@@ -52,7 +52,7 @@ The daemon is what complicates docker in docker.
 
     selfdock -v /mnt/data /mnt/data run sh
 
-    selfdock --root /mnt/debian run sh
+    selfdock --rootfs /mnt/debian run sh
 
 ## Dependencies
 * [narg](https://github.com/anordal/narg)

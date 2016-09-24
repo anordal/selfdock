@@ -304,7 +304,7 @@ int main(int argc, char *argv[])
 	};
 	static const struct narg_optspec optv[OPT_MAX] = {
 		{"h","help",NULL,"Show help text"},
-		{"r","root"," DIR","Directory to use as root filesystem"},
+		{"r","rootfs"," DIR","Directory to use as root filesystem"},
 		{"C", NULL, " DIR","Working directory"},
 		{"m","map"," SRC DST","Mount SRC to DST read-only"},
 		{"v","vol"," SRC DST","Mount SRC to DST read-write"},
