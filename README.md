@@ -6,7 +6,63 @@ without being slow at that,
 can run off the host's root filesystem,
 and can run within itself.
 
-## Principles
+## Suitability
+Docker is too slow for use in commads supposed to be run interactively (such as compiler toolchains) due to disk abuse. Here's with a poor 5400 rpm harddisk for great effect:
+
+    > time docker run --rm -it ubuntu true
+    0.04user 0.02system 0:04.19elapsed 1%CPU (0avgtext+0avgdata 27428maxresident)k
+    0inputs+0outputs (0major+1664minor)pagefaults 0swaps
+
+Selfdock does not touch the platters, and finishes instantly:
+
+    > time selfdock --rootfs /opt/os/ubuntu run true
+    0.00user 0.00system 0:00.01elapsed 0%CPU (0avgtext+0avgdata 1136maxresident)k
+    0inputs+0outputs (0major+112minor)pagefaults 0swaps
+
+And doesn't need a separate root filesystem (omitting --rootfs is like setting --rootfs=/):
+
+    > selfdock run true
+
+Selfdock is optimized for running one-off commands, but can of course also run daemons.
+This is an intended side-effect – equally valuable, just no focus of optimization.
+
+## Usage examples
+
+    selfdock --help
+
+Run `sh` in a container (yes, interactive commands just work, and you don't need an "image" first).
+Observe that this shell becomes pid 1, and that only the root filesystem is visible.
+
+    selfdock run sh
+    sh$ htop
+    sh$ df -h
+
+To make other filesystems appear (possibly writable) somewhere inside the container:
+
+    selfdock --map /mnt/rodata /mnt/rodata \
+             --vol /mnt/rwdata /mnt/rwdata run sh
+
+Use a different root filesystem, say from another Linux installation:
+
+    selfdock --rootfs /mnt/debian run sh
+
+[Extract a docker image](https://github.com/larsks/undocker) and use it as a root filesystem:
+
+    docker save busybox | undocker -i -o /tmp/busybox busybox
+    sudo mkdir /opt/os/
+    sudo mv /tmp/busybox /opt/os/
+    selfdock --rootfs /opt/os/busybox run sh
+
+Sandbox demo: Observe that `eject` only works if you give it access to /dev:
+
+    eject # Opens your CD tray
+    eject -t # Closes it
+
+    selfdock --rootfs /opt/os/busybox run eject # Shall fail (missing /dev/cdrom)
+
+    selfdock --rootfs /opt/os/busybox -v /dev /dev run eject
+
+## Design Principles
 ### No privilege escalation
 Dilemma: To do what Selfdock (and Docker) does requires root privileges,
 even if your goal may be the opposite,
@@ -46,18 +102,11 @@ It is intended that in a special *build* mode, the root filesystem will be writa
 ### No daemon
 The daemon is what complicates docker in docker.
 
-## Usage examples
-
-    selfdock run sh
-
-    selfdock -v /mnt/data /mnt/data run sh
-
-    selfdock --rootfs /mnt/debian run sh
-
-## Dependencies
+## Build
+### Dependencies
 * [narg](https://github.com/anordal/narg)
 
-## Compile & install
+### Compile & install
 
     mkdir /tmp/build-selfdock
     meson /tmp/build-selfdock --buildtype=release
