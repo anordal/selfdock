@@ -62,6 +62,10 @@ Sandbox demo: Observe that `eject` only works if you give it access to /dev:
 
     selfdock --rootfs /opt/os/busybox -v /dev /dev run eject
 
+In a special *build* mode, the root filesystem is writable (for building the root filesystem):
+
+    selfdock --rootfs /opt/os/debootstrap build …
+
 ## Design Principles
 ### No privilege escalation
 Dilemma: To do what Selfdock (and Docker) does requires root privileges,
@@ -97,8 +101,6 @@ no other filesystems in the container need to, or should be, writable. So forbid
 * No disk writes: There is no write backing or anything to copy/delete on spawn/teardown. I can spawn >200 instances per second on my slow laptop, which is over 100 times faster than Docker. Microscaling, yay!
 * Memory friendly – sharing immutable state between instances of the same image.
 
-It is intended that in a special *build* mode, the root filesystem will be writable, but that's for building the root filesystem.
-
 ### No daemon
 The daemon is what complicates docker in docker.
 
@@ -127,5 +129,4 @@ Note: Tests *the installed* program:
     ninja uninstall
 
 ## To do
-* selfdock enter
-* selfdock build
+* `selfdock enter`: A way to enter a running instance, like `docker exec -it`. Should be possible already with `nsenter`, dunno how yet.

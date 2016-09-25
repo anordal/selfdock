@@ -158,7 +158,8 @@ static int tmpfs_mkdir(const char *path, int flag, const char *opt)
 }
 
 struct child_args {
-	char newroot[48];
+	char newroot[47];
+	_Bool permit_writable;
 	const char *oldroot;
 	const char *cd;
 	struct narg_optparam *map, *vol;
@@ -177,12 +178,9 @@ static int child(void *arg)
 		return EXIT_CANNOT;
 	}
 
-	// Use overlayfs sparingly; it has a maximum stacking depth.
-	_Bool already_readonly = is_readonly_rootfs(self->oldroot);
-
 	if (mount_bind(
 		self->oldroot,
-		already_readonly ? NULL : TOSTRING(ROOTOVERLAY),
+		self->permit_writable ? NULL : TOSTRING(ROOTOVERLAY),
 		self->newroot))
 	{
 		return EXIT_CANNOT;
@@ -193,7 +191,7 @@ static int child(void *arg)
 		return EXIT_CANNOT;
 	}
 
-	if (already_readonly) {
+	if (self->permit_writable) {
 		if (mount_bind(TOSTRING(ROOTOVERLAY) "/dev", NULL, "dev")) {
 			return EXIT_CANNOT;
 		}
@@ -345,18 +343,6 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (argc - nargres.arg < 2) {
-		printf(
-			"Usage: %s [OPTIONS] run argv\n"
-			"       %s run [OPTIONS] -- argv\n"
-			, argv[0], argv[0]);
-		return EXIT_CANNOT;
-	}
-	if (0 != strcmp(argv[nargres.arg], "run")) {
-		fputs("Action must be \"run\" for now. TODO: build|enter\n", stderr);
-		return EXIT_CANNOT;
-	}
-
 	const unsigned initial_stack_size = 4096;
 	char *stack = mmap(
 		NULL, initial_stack_size,
@@ -375,6 +361,22 @@ int main(int argc, char *argv[])
 	barnebok.map = ansv+OPT_MAP;
 	barnebok.vol = ansv+OPT_VOL;
 	barnebok.argv = argv + nargres.arg + 1; // += optional + positional args
+
+	if (argc - nargres.arg < 2) {
+		printf(
+			"Usage: %s run|build [OPTIONS] argv\n"
+			, argv[0]);
+		return EXIT_CANNOT;
+	}
+	if (0 == strcmp(argv[nargres.arg], "run")) {
+		// Use overlayfs sparingly; it has a maximum stacking depth.
+		barnebok.permit_writable = is_readonly_rootfs(barnebok.oldroot);
+	} else if (0 == strcmp(argv[nargres.arg], "build")) {
+		barnebok.permit_writable = ~0;
+	} else {
+		fputs("Action must be \"run\" or \"build\" for now. TODO: enter\n", stderr);
+		return EXIT_CANNOT;
+	}
 
 	barnebok.rundir = getenv("XDG_RUNTIME_DIR");
 	if (!barnebok.rundir) {
