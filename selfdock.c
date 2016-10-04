@@ -24,6 +24,7 @@
 
 #define STRINGIFY(x) #x
 #define TOSTRING(x) STRINGIFY(x)
+#define ARRAY_SIZE(x) sizeof(x)/sizeof(x[0])
 
 #ifndef PATH_MAX
 #	define PATH_MAX 1024
@@ -38,6 +39,35 @@
 #define EXIT_UNTESTABLE  125 //inapplicable convention (git-bisect)
 #define EXIT_CMDNOTEXEC  126 //applicable convention
 #define EXIT_CMDNOTFOUND 127 //applicable convention
+
+static volatile int sigrid;
+static void take_signal(int sig)
+{
+	sigrid = sig;
+}
+
+static int start_handling_signals()
+{
+	struct sigaction sa;
+	sa.sa_handler = take_signal;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+	static const int handleable_signals[] = {
+		SIGHUP,
+		SIGINT,
+		SIGUSR1,
+		SIGUSR2,
+		SIGPIPE,
+		SIGTERM
+	};
+	for (unsigned i=0; i != ARRAY_SIZE(handleable_signals); ++i) {
+		int sig = handleable_signals[i];
+		if (sigaction(sig, &sa, NULL)) {
+			return sig;
+		}
+	}
+	return 0;
+}
 
 static _Bool is_suid(const char *path)
 {
@@ -408,28 +438,42 @@ int main(int argc, char *argv[])
 			: EXIT_CANNOT;
 	}
 
-	int ret = EXIT_CANNOT;
+	int sigfail = start_handling_signals();
+	if (sigfail) {
+		fprintf(stderr, "sigaction(sig=%d): %s\n", sigfail, strerror(errno));
+		return EXIT_CANNOT;
+	}
+
 	pid = clone(
 		child, stack + initial_stack_size,
 		CLONE_VFORK|CLONE_VM|CLONE_NEWNS|CLONE_NEWPID|SIGCHLD,
 		&barnebok
 	);
+
+	int ret = EXIT_CANNOT;
 	if (pid == -1) {
 		if (!is_suid(argv[0])) {
 			fprintf(stderr, "No suid. Please check that the program is installed correctly.\n");
 		} else {
 			fprintf(stderr, "clone: %s\n", strerror(errno));
 		}
-	} else {
+	} else do {
 		int status;
 		if (-1 == wait(&status)) {
+			if (errno == EINTR) {
+				int deliver = sigrid;
+				if (kill(pid, deliver)) {
+					fprintf(stderr, "Failed to deliver signal %s\n", strsignal(deliver));
+				}
+				continue;
+			}
 			perror("wait");
 		} else if (WIFEXITED(status)) {
 			ret = WEXITSTATUS(status);
 		} else if (WIFSIGNALED(status)) {
 			psignal(WTERMSIG(status), barnebok.argv[0]);
 		}
-	}
+	} while (0);
 	if (rmdir(barnebok.newroot)) {
 		perror(barnebok.newroot);
 	}
