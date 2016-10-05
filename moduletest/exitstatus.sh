@@ -1,5 +1,4 @@
 #!/bin/sh
-test "$XDG_RUNTIME_DIR" = '' && XDG_RUNTIME_DIR=/tmp
 
 "$1" run sh -c 'exit 42'
 test $? = 42 || exit 1

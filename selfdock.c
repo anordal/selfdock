@@ -82,20 +82,6 @@ static _Bool isdir_pathname(const char *path)
 	return strchr(path, '/') && 0 == lstat(path, &info) && S_ISDIR(info.st_mode);
 }
 
-// Drop euid privileges temporarily for the directory creation.
-// It would be a security problem to expose directory creation
-// with elevated privileges if the user can influence the path.
-static int mkdir_as_realuser(char *path)
-{
-	uid_t effective = geteuid();
-	if (seteuid(getuid())) return -1;
-
-	int ret = mkdir(path, 0700);
-
-	if (seteuid(effective)) return -1;
-	return ret;
-}
-
 // Use overlayfs to emulate a readonly bind mount when required,
 // as indicated by a non-NULL @upper argumment, else bind mount.
 // Errmsg printing taken care of.
@@ -151,49 +137,11 @@ static _Bool is_readonly_rootfs(const char *rootdir)
 	return (errno == EROFS);
 }
 
-static int tmpfs_mkdir_dirname(
-	const char *dirname, struct stat *statbuf,
-	int flag, const char *opt)
-{
-	if (0 == stat(dirname, statbuf)) {
-		return mount("none", dirname, "tmpfs", flag, opt);
-	}
-
-	char *basename = strrchr(dirname, '/');
-	if (!basename || basename == dirname) {
-		// stat set errno
-		return -1; //fail
-	}
-
-	*basename = '\0';
-	int ret = tmpfs_mkdir_dirname(dirname, statbuf, flag, opt);
-	*basename = '/';
-
-	if (mkdir(dirname, 0755)) {
-		ret = -1;
-	}
-	return ret;
-}
-
-static int tmpfs_mkdir(const char *path, int flag, const char *opt)
-{
-	char dirname[PATH_MAX];
-	if (PATH_MAX <= snprintf(dirname, PATH_MAX, "%s", path)) {
-		errno = ENAMETOOLONG;
-		return -1;
-	}
-
-	struct stat statbuf;
-	return tmpfs_mkdir_dirname(dirname, &statbuf, flag, opt);
-}
-
 struct child_args {
-	char newroot[47];
 	_Bool permit_writable;
 	const char *oldroot;
 	const char *cd;
 	struct narg_optparam *map, *vol;
-	const char *rundir;
 	char *const *argv;
 };
 static int child(void *arg)
@@ -208,16 +156,18 @@ static int child(void *arg)
 		return EXIT_CANNOT;
 	}
 
+	static const char newroot[] = TOSTRING(ROOTOVERLAY) "/dev/empty";
+
 	if (mount_bind(
 		self->oldroot,
 		self->permit_writable ? NULL : TOSTRING(ROOTOVERLAY),
-		self->newroot))
+		newroot))
 	{
 		return EXIT_CANNOT;
 	}
 
-	if (chdir(self->newroot)) {
-		fprintf(stderr, "chdir: %s: %s\n", self->newroot, strerror(errno));
+	if (chdir(newroot)) {
+		fprintf(stderr, "chdir: %s: %s\n", newroot, strerror(errno));
 		return EXIT_CANNOT;
 	}
 
@@ -248,7 +198,7 @@ static int child(void *arg)
 	}
 
 	if (chroot(".")) {
-		fprintf(stderr, "chroot: %s: %s\n", self->newroot, strerror(errno));
+		fprintf(stderr, "chroot: %s: %s\n", newroot, strerror(errno));
 		return EXIT_CANNOT;
 	}
 
@@ -262,13 +212,13 @@ static int child(void *arg)
 		return EXIT_CANNOT;
 	}
 
-	if (tmpfs_mkdir(self->rundir, MS_NOEXEC, "size=2M")) {
-		perror(self->rundir);
+	if (mount("none", "tmp", "tmpfs", MS_NOEXEC, "size=2M")) {
+		perror("tmp");
 		return EXIT_CANNOT;
 	}
 	uid_t uid = getuid();
-	if (chown(self->rundir, uid, -1)) {
-		perror(self->rundir);
+	if (chmod("tmp", 0777)) {
+		perror("tmp");
 		return EXIT_CANNOT;
 	}
 
@@ -408,43 +358,13 @@ int main(int argc, char *argv[])
 		return EXIT_CANNOT;
 	}
 
-	barnebok.rundir = getenv("XDG_RUNTIME_DIR");
-	if (!barnebok.rundir) {
-		// This can be caused by sudo.
-		// If not (correctly) installed as a suid program,
-		// clone will fail with EPERM, which
-		// without the suid hint,
-		// users will interpret as "try sudo" and get here.
-		fputs("Please set XDG_RUNTIME_DIR to your temporary directory of choice.\n", stderr);
-		return EXIT_CANNOT;
-	}
-	pid_t pid = getpid();
-	if (sizeof(barnebok.newroot) <= (size_t)snprintf(
-		barnebok.newroot, sizeof(barnebok.newroot),
-		"%s/pid_0x%lx", barnebok.rundir, (long)pid
-	)) {
-		fprintf(stderr, "%s/pid_0x%lx: %s\n"
-			, barnebok.rundir
-			, (long)pid
-			, strerror(ENAMETOOLONG)
-		);
-		return EXIT_CANNOT;
-	}
-
-	if (mkdir_as_realuser(barnebok.newroot)) {
-		perror(barnebok.newroot);
-		return (errno == EEXIST)
-			? EXIT_NAME_IN_USE
-			: EXIT_CANNOT;
-	}
-
 	int sigfail = start_handling_signals();
 	if (sigfail) {
 		fprintf(stderr, "sigaction(sig=%d): %s\n", sigfail, strerror(errno));
 		return EXIT_CANNOT;
 	}
 
-	pid = clone(
+	pid_t pid = clone(
 		child, stack + initial_stack_size,
 		CLONE_VFORK|CLONE_VM|CLONE_NEWNS|CLONE_NEWPID|SIGCHLD,
 		&barnebok
@@ -474,8 +394,5 @@ int main(int argc, char *argv[])
 			psignal(WTERMSIG(status), barnebok.argv[0]);
 		}
 	} while (0);
-	if (rmdir(barnebok.newroot)) {
-		perror(barnebok.newroot);
-	}
 	return ret;
 }
