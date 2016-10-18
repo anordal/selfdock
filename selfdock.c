@@ -277,15 +277,19 @@ int main(int argc, char *argv[])
 		OPT_CD,
 		OPT_MAP,
 		OPT_VOL,
+		OPT_ENV,
+		OPT_ENV_RM,
 		OPT_IGN,
 		OPT_MAX
 	};
 	static const struct narg_optspec optv[OPT_MAX] = {
 		{"h","help",NULL,"Show help text"},
 		{"r","rootfs"," DIR","Directory to use as root filesystem"},
-		{"C", NULL, " DIR","Working directory"},
+		{"C", NULL, "DIR","Working directory"},
 		{"m","map"," SRC DST","Mount SRC to DST read-only"},
 		{"v","vol"," SRC DST","Mount SRC to DST read-write"},
+		{"e","env"," ENV val","Set environment variable ENV to val"},
+		{"E", NULL, "ENV","Unset environment variable ENV"},
 		{NULL,"",&narg_metavar.ignore_rest,"Don\'t interpret further arguments as options"}
 	};
 	struct narg_optparam ansv[OPT_MAX] = {
@@ -294,6 +298,8 @@ int main(int argc, char *argv[])
 		[OPT_CD ] = {1, (const char*[]){"/"}},
 		[OPT_MAP] = {0, NULL},
 		[OPT_VOL] = {0, NULL},
+		[OPT_ENV] = {0, NULL},
+		[OPT_ENV_RM] = {0, NULL},
 		[OPT_IGN] = {0, NULL}
 	};
 	struct narg_result nargres = narg_findopt(argv, optv, ansv, OPT_MAX, 1, 2);
@@ -319,6 +325,21 @@ int main(int argc, char *argv[])
 		if (ansv[OPT_VOL].paramv[i+1][0] != '/')
 		{
 			fprintf(stderr, "%s destinations must be absolute\n", "--vol");
+			return EXIT_CANNOT;
+		}
+	}
+	for (unsigned i=0; i < ansv[OPT_ENV].paramc; i += 2) {
+		const char *env = ansv[OPT_ENV].paramv[i];
+		const char *val = ansv[OPT_ENV].paramv[i+1];
+		if (setenv(env, val, ~0)) {
+			fprintf(stderr, "setenv %s=%s: %s\n", env, val, strerror(errno));
+			return EXIT_CANNOT;
+		}
+	}
+	for (unsigned i=0; i < ansv[OPT_ENV_RM].paramc; i += 1) {
+		const char *env = ansv[OPT_ENV_RM].paramv[i];
+		if (unsetenv(env)) {
+			fprintf(stderr, "unsetenv %s: %s\n", env, strerror(errno));
 			return EXIT_CANNOT;
 		}
 	}
