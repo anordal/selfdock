@@ -69,12 +69,6 @@ static int start_handling_signals()
 	return 0;
 }
 
-static _Bool is_suid(const char *path)
-{
-	struct stat info;
-	return 0 == stat(path, &info) && info.st_mode & S_ISUID;
-}
-
 // is what execvp calls a pathname && exists && is (a symlink to) a directory
 static _Bool isdir_pathname(const char *path)
 {
@@ -216,15 +210,14 @@ static int child(void *arg)
 		perror("tmp");
 		return EXIT_CANNOT;
 	}
-	uid_t uid = getuid();
 	if (chmod("tmp", 0777)) {
 		perror("tmp");
 		return EXIT_CANNOT;
 	}
 
 	// Drop effective uid
-	if (setuid(uid)) {
-		perror("setuid");
+	if (seteuid(getuid())) {
+		// Not reproducible by installing non-suid.
 		return EXIT_CANNOT;
 	}
 
@@ -271,6 +264,12 @@ static void help(const struct narg_optspec *optv, struct narg_optparam *ansv, un
 
 int main(int argc, char *argv[])
 {
+	uid_t uid = getuid();
+	if (seteuid(uid)) {
+		// Not reproducible by installing non-suid.
+		return EXIT_CANNOT;
+	}
+
 	enum {
 		OPT_HELP,
 		OPT_ROOT,
@@ -385,19 +384,21 @@ int main(int argc, char *argv[])
 		return EXIT_CANNOT;
 	}
 
+	if (seteuid(0)) {
+		perror("seteuid");
+		fputs("This usually means that the program was not installed with suid permission.", stderr);
+		return EXIT_CANNOT;
+	}
 	pid_t pid = clone(
 		child, stack + initial_stack_size,
 		CLONE_VFORK|CLONE_VM|CLONE_NEWNS|CLONE_NEWPID|SIGCHLD,
 		&barnebok
 	);
+	seteuid(uid);
 
 	int ret = EXIT_CANNOT;
 	if (pid == -1) {
-		if (!is_suid(argv[0])) {
-			fprintf(stderr, "No suid. Please check that the program is installed correctly.\n");
-		} else {
-			fprintf(stderr, "clone: %s\n", strerror(errno));
-		}
+		perror("clone");
 	} else do {
 		int status;
 		if (-1 == wait(&status)) {
