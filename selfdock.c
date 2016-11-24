@@ -138,6 +138,18 @@ struct child_args {
 	struct narg_optparam *map, *vol;
 	char *const *argv;
 };
+
+static int tmpfs_777(const char *path)
+{
+	if (mount("none", path, "tmpfs", MS_NOEXEC, "size=2M")) {
+		return -1;
+	}
+	if (chmod(path, 0777)) {
+		return -1;
+	}
+	return 0;
+}
+
 static int child(void *arg)
 {
 	const struct child_args *self = arg;
@@ -206,12 +218,12 @@ static int child(void *arg)
 		return EXIT_CANNOT;
 	}
 
-	if (mount("none", "tmp", "tmpfs", MS_NOEXEC, "size=2M")) {
+	if (tmpfs_777("tmp")) {
 		perror("tmp");
 		return EXIT_CANNOT;
 	}
-	if (chmod("tmp", 0777)) {
-		perror("tmp");
+	if (tmpfs_777("run")) {
+		perror("run");
 		return EXIT_CANNOT;
 	}
 
