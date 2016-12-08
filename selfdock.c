@@ -252,7 +252,7 @@ static int child(void *arg)
 	}
 }
 
-const char *narg_strerror(unsigned err) {
+static const char *narg_strerror(unsigned err) {
 	switch (err) {
 		case NARG_ENOSUCHOPTION: return "No such option";
 		case NARG_EMISSINGPARAM: return "Missing parameter";
@@ -262,7 +262,7 @@ const char *narg_strerror(unsigned err) {
 	return "Unknown error";
 }
 
-void help(const struct narg_optspec *optv, struct narg_optparam *ansv, unsigned optc) {
+static void help(const struct narg_optspec *optv, struct narg_optparam *ansv, unsigned optc) {
 	unsigned width = narg_terminalwidth(stdout);
 	flockfile(stdout);
 	narg_printopt_unlocked(stdout, width, optv, ansv, optc, dgettext, NULL, 2);
