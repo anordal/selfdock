@@ -21,14 +21,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h> //mmap
+#include "usualsuspects.h"
+#include "instancefile.h"
 
-#define STRINGIFY(x) #x
-#define TOSTRING(x) STRINGIFY(x)
-#define ARRAY_SIZE(x) sizeof(x)/sizeof(x[0])
-
-#ifndef PATH_MAX
-#	define PATH_MAX 1024
-#endif
 #ifndef ROOTOVERLAY
 #	error ROOTOVERLAY not defined
 #endif
@@ -131,14 +126,96 @@ static _Bool is_readonly_rootfs(const char *rootdir)
 	return (errno == EROFS);
 }
 
+static int enter_ns(char *path, unsigned pos, const char *ns)
+{
+	strcpy(path+pos, ns);
+	int fd = open(path, O_RDONLY);
+	if (fd == -1) {
+		perror(path);
+		return -1;
+	}
+	int ret = setns(fd, 0);
+	close(fd);
+	return ret;
+}
+
+static int deny_entering_othermans_instance(uid_t uid)
+{
+	struct stat info;
+	if (stat("/proc/1", &info))
+	{
+		return -1;
+	}
+	if (info.st_uid != uid)
+	{
+		return -1;
+	}
+	return 0;
+}
+
+static int exec_or_failhand(char *const *argv);
+
 struct child_args {
 	_Bool permit_writable;
 	uid_t uid;
 	const char *oldroot;
 	const char *cd;
+	const char *name;
 	struct narg_optparam *map, *vol;
 	char *const *argv;
 };
+
+static int selfdock_enter(const struct child_args *self)
+{
+	pid_t pid = instancefile_get(self->name, self->uid);
+	if (pid == -1) {
+		if (errno == ENOENT) {
+			fprintf(stderr, "%s: Not running.\n", self->name);
+			return EXIT_NAME_IN_USE;
+		} else {
+			return EXIT_CANNOT;
+		}
+	}
+
+	if (seteuid(0)) {
+		perror("seteuid");
+		fputs("This usually means that the program was not installed with suid permission.", stderr);
+		return EXIT_CANNOT;
+	}
+	int ret = EXIT_CANNOT;
+	do {
+		char path[24]; // /proc/4294967296/{ns/{pid,mnt},cwd}
+		unsigned proc_pid_ns = sprintf(path, "/proc/%u/ns/", (unsigned)pid);
+		unsigned proc_pid = proc_pid_ns - 3;
+
+		if (enter_ns(path, proc_pid_ns, "pid")) {
+			break;
+		}
+		if (enter_ns(path, proc_pid_ns, "mnt")) {
+			break;
+		}
+		strcpy(path+proc_pid, "cwd");
+		if (chroot(path)) {
+			perror("chroot");
+			break;
+		}
+		ret = 0;
+	} while (0);
+	// Drop effective uid
+	if (seteuid(self->uid)) {
+		ret = EXIT_CANNOT;
+	}
+	if (ret) {
+		return ret;
+	}
+
+	if (deny_entering_othermans_instance(self->uid))
+	{
+		fprintf(stderr, "You do not own this instance: %s\n", self->name);
+		return EXIT_CANNOT;
+	}
+	return exec_or_failhand(self->argv);
+}
 
 static int tmpfs_777(const char *path)
 {
@@ -239,14 +316,19 @@ static int child(void *arg)
 		return EXIT_CANNOT;
 	}
 
-	execvp(self->argv[0], self->argv);
+	return exec_or_failhand(self->argv);
+}
+
+static int exec_or_failhand(char *const *argv)
+{
+	execvp(argv[0], argv);
 
 	// fail
 	int errval = errno;
-	if (errval == EACCES && isdir_pathname(self->argv[0])) {
+	if (errval == EACCES && isdir_pathname(argv[0])) {
 		errval = EISDIR;
 	}
-	fprintf(stderr, "exec: %s: %s\n", self->argv[0], strerror(errval));
+	fprintf(stderr, "exec: %s: %s\n", argv[0], strerror(errval));
 	switch(errval) {
 		case ELOOP:
 		case ENAMETOOLONG:
@@ -283,6 +365,21 @@ static int selfdock_run(struct child_args* self)
 		fputs("This usually means that the program was not installed with suid permission.", stderr);
 		return EXIT_CANNOT;
 	}
+
+	int instance_fd = -1;
+	if (self->name) {
+		instance_fd = instancefile_open(self->name, self->uid);
+		if (instance_fd == -1) {
+			seteuid(self->uid);
+			if (errno == EEXIST) {
+				fprintf(stderr, "%s: Already running.\n", self->name);
+				return EXIT_NAME_IN_USE;
+			} else {
+				return EXIT_CANNOT;
+			}
+		}
+	}
+	// Beyond this point, failures must go through cleanup_instance_file.
 	int ret = EXIT_CANNOT;
 
 	pid_t pid = clone(
@@ -296,6 +393,14 @@ static int selfdock_run(struct child_args* self)
 		perror("clone");
 		goto cleanup_instance_file;
 	}
+
+	if (instance_fd != -1) {
+		if (fd_write_eintr_retry(instance_fd, (void*)&pid, sizeof(pid))) {
+			goto cleanup_instance_file;
+		}
+	}
+	close(instance_fd);
+	instance_fd = -1;
 
 	do {
 		int status;
@@ -316,6 +421,12 @@ static int selfdock_run(struct child_args* self)
 	} while (0);
 
 cleanup_instance_file:
+	if (self->name) {
+		if (instance_fd != -1) {
+			close(instance_fd);
+		}
+		instancefile_rm(self->name);
+	}
 	return ret;
 }
 
@@ -353,6 +464,7 @@ int main(int argc, char *argv[])
 		OPT_VOL,
 		OPT_ENV,
 		OPT_ENV_RM,
+		OPT_NAME,
 		OPT_IGN,
 		OPT_MAX
 	};
@@ -364,6 +476,7 @@ int main(int argc, char *argv[])
 		{"v","vol"," SRC DST","Mount SRC to DST read-write"},
 		{"e","env"," ENV val","Set environment variable ENV to val"},
 		{"E", NULL, "ENV","Unset environment variable ENV"},
+		{"i","instance-name"," NAME","Name of the running instance"},
 		{NULL,"",&narg_metavar.ignore_rest,"Don\'t interpret further arguments as options"}
 	};
 	struct narg_optparam ansv[OPT_MAX] = {
@@ -374,6 +487,7 @@ int main(int argc, char *argv[])
 		[OPT_VOL] = {0, NULL},
 		[OPT_ENV] = {0, NULL},
 		[OPT_ENV_RM] = {0, NULL},
+		[OPT_NAME] = {0, NULL},
 		[OPT_IGN] = {0, NULL}
 	};
 	struct narg_result nargres = narg_findopt(argv, optv, ansv, OPT_MAX, 1, 2);
@@ -393,7 +507,11 @@ int main(int argc, char *argv[])
 		help(optv, ansv, OPT_MAX);
 		return EXIT_SUCCESS;
 	}
-
+	if (ansv[OPT_NAME].paramc) {
+		barnebok.name = ansv[OPT_NAME].paramv[0];
+	} else {
+		barnebok.name = NULL;
+	}
 	for (unsigned i=0; i < ansv[OPT_MAP].paramc; i += 2) {
 		if (ansv[OPT_MAP].paramv[i+1][0] != '/')
 		{
@@ -433,7 +551,7 @@ int main(int argc, char *argv[])
 			barnebok.permit_writable = ~0;
 			return selfdock_run(&barnebok);
 		} else if (0 == strcmp(argv[nargres.arg], "enter")) {
-			fputs("Sorry, not implemented.\n", stderr);
+			return selfdock_enter(&barnebok);
 		}
 	}
 	printf(

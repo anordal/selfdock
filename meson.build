@@ -8,8 +8,13 @@ rootoverlay = prefix + '/share/selfdock'
 
 narg = dependency('narg')
 
+src = [
+	'selfdock.c',
+	'instancefile.c',
+]
+
 selfdock = executable(
-	'selfdock', 'selfdock.c',
+	'selfdock', src,
 	dependencies: narg,
 	c_args: '-DROOTOVERLAY=' + rootoverlay,
 	install: false
