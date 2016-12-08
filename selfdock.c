@@ -133,6 +133,7 @@ static _Bool is_readonly_rootfs(const char *rootdir)
 
 struct child_args {
 	_Bool permit_writable;
+	uid_t uid;
 	const char *oldroot;
 	const char *cd;
 	struct narg_optparam *map, *vol;
@@ -228,7 +229,7 @@ static int child(void *arg)
 	}
 
 	// Drop effective uid
-	if (seteuid(getuid())) {
+	if (seteuid(self->uid)) {
 		// Not reproducible by installing non-suid.
 		return EXIT_CANNOT;
 	}
@@ -257,6 +258,67 @@ static int child(void *arg)
 	}
 }
 
+static int selfdock_run(struct child_args* self)
+{
+	const unsigned initial_stack_size = 4096;
+	char *stack = mmap(
+		NULL, initial_stack_size,
+		PROT_READ|PROT_WRITE,
+		MAP_PRIVATE|MAP_GROWSDOWN|MAP_ANONYMOUS,
+		-1, 0
+	);
+	if (stack == MAP_FAILED) {
+		perror("mmap");
+		return EXIT_CANNOT;
+	}
+
+	int sigfail = start_handling_signals();
+	if (sigfail) {
+		fprintf(stderr, "sigaction(sig=%d): %s\n", sigfail, strerror(errno));
+		return EXIT_CANNOT;
+	}
+
+	if (seteuid(0)) {
+		perror("seteuid");
+		fputs("This usually means that the program was not installed with suid permission.", stderr);
+		return EXIT_CANNOT;
+	}
+	int ret = EXIT_CANNOT;
+
+	pid_t pid = clone(
+		child, stack + initial_stack_size,
+		CLONE_VFORK|CLONE_VM|CLONE_NEWNS|CLONE_NEWPID|SIGCHLD,
+		self
+	);
+	seteuid(self->uid);
+
+	if (pid == -1) {
+		perror("clone");
+		goto cleanup_instance_file;
+	}
+
+	do {
+		int status;
+		if (-1 == wait(&status)) {
+			if (errno == EINTR) {
+				int deliver = sigrid;
+				if (kill(pid, deliver)) {
+					fprintf(stderr, "Failed to deliver signal %s\n", strsignal(deliver));
+				}
+				continue;
+			}
+			perror("wait");
+		} else if (WIFEXITED(status)) {
+			ret = WEXITSTATUS(status);
+		} else if (WIFSIGNALED(status)) {
+			psignal(WTERMSIG(status), self->argv[0]);
+		}
+	} while (0);
+
+cleanup_instance_file:
+	return ret;
+}
+
 static const char *narg_strerror(unsigned err) {
 	switch (err) {
 		case NARG_ENOSUCHOPTION: return "No such option";
@@ -276,8 +338,9 @@ static void help(const struct narg_optspec *optv, struct narg_optparam *ansv, un
 
 int main(int argc, char *argv[])
 {
-	uid_t uid = getuid();
-	if (seteuid(uid)) {
+	struct child_args barnebok;
+	barnebok.uid = getuid();
+	if (seteuid(barnebok.uid)) {
 		// Not reproducible by installing non-suid.
 		return EXIT_CANNOT;
 	}
@@ -319,6 +382,12 @@ int main(int argc, char *argv[])
 		return EXIT_CANNOT;
 	}
 
+	barnebok.oldroot = ansv[OPT_ROOT].paramv[0];
+	barnebok.cd      = ansv[OPT_CD  ].paramv[0];
+	barnebok.map     = ansv+OPT_MAP;
+	barnebok.vol     = ansv+OPT_VOL;
+	barnebok.argv    = argv + nargres.arg + 1; // += optional + positional args
+
 	if (ansv[OPT_HELP].paramc) {
 		ansv[OPT_HELP].paramc = 0;
 		help(optv, ansv, OPT_MAX);
@@ -355,78 +424,20 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	const unsigned initial_stack_size = 4096;
-	char *stack = mmap(
-		NULL, initial_stack_size,
-		PROT_READ|PROT_WRITE,
-		MAP_PRIVATE|MAP_GROWSDOWN|MAP_ANONYMOUS,
-		-1, 0
-	);
-	if (stack == MAP_FAILED) {
-		perror("mmap");
-		return EXIT_CANNOT;
-	}
-
-	struct child_args barnebok;
-	barnebok.oldroot = ansv[OPT_ROOT].paramv[0];
-	barnebok.cd  = ansv[OPT_CD].paramv[0];
-	barnebok.map = ansv+OPT_MAP;
-	barnebok.vol = ansv+OPT_VOL;
-	barnebok.argv = argv + nargres.arg + 1; // += optional + positional args
-
-	if (argc - nargres.arg < 2) {
-		printf(
-			"Usage: %s run|build [OPTIONS] argv\n"
-			, argv[0]);
-		return EXIT_CANNOT;
-	}
-	if (0 == strcmp(argv[nargres.arg], "run")) {
-		// Use overlayfs sparingly; it has a maximum stacking depth.
-		barnebok.permit_writable = is_readonly_rootfs(barnebok.oldroot);
-	} else if (0 == strcmp(argv[nargres.arg], "build")) {
-		barnebok.permit_writable = ~0;
-	} else {
-		fputs("Action must be \"run\" or \"build\" for now. TODO: enter\n", stderr);
-		return EXIT_CANNOT;
-	}
-
-	int sigfail = start_handling_signals();
-	if (sigfail) {
-		fprintf(stderr, "sigaction(sig=%d): %s\n", sigfail, strerror(errno));
-		return EXIT_CANNOT;
-	}
-
-	if (seteuid(0)) {
-		perror("seteuid");
-		fputs("This usually means that the program was not installed with suid permission.", stderr);
-		return EXIT_CANNOT;
-	}
-	pid_t pid = clone(
-		child, stack + initial_stack_size,
-		CLONE_VFORK|CLONE_VM|CLONE_NEWNS|CLONE_NEWPID|SIGCHLD,
-		&barnebok
-	);
-	seteuid(uid);
-
-	int ret = EXIT_CANNOT;
-	if (pid == -1) {
-		perror("clone");
-	} else do {
-		int status;
-		if (-1 == wait(&status)) {
-			if (errno == EINTR) {
-				int deliver = sigrid;
-				if (kill(pid, deliver)) {
-					fprintf(stderr, "Failed to deliver signal %s\n", strsignal(deliver));
-				}
-				continue;
-			}
-			perror("wait");
-		} else if (WIFEXITED(status)) {
-			ret = WEXITSTATUS(status);
-		} else if (WIFSIGNALED(status)) {
-			psignal(WTERMSIG(status), barnebok.argv[0]);
+	if (argc - nargres.arg >= 2) {
+		if (0 == strcmp(argv[nargres.arg], "run")) {
+			// Use overlayfs sparingly; it has a maximum stacking depth.
+			barnebok.permit_writable = is_readonly_rootfs(barnebok.oldroot);
+			return selfdock_run(&barnebok);
+		} else if (0 == strcmp(argv[nargres.arg], "build")) {
+			barnebok.permit_writable = ~0;
+			return selfdock_run(&barnebok);
+		} else if (0 == strcmp(argv[nargres.arg], "enter")) {
+			fputs("Sorry, not implemented.\n", stderr);
 		}
-	} while (0);
-	return ret;
+	}
+	printf(
+		"Usage: %s run|build|enter [OPTIONS] argv\n"
+		, argv[0]);
+	return EXIT_CANNOT;
 }
