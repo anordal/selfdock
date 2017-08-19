@@ -126,7 +126,9 @@ Note: Tests *the installed* program:
 
 ### Uninstall
 
-    ninja uninstall
+    ninja uninstall-actual
+
+(I can't call it *uninstall* because it's [taken](https://github.com/mesonbuild/meson/issues/753) and can't be hooked into yet.)
 
 ## To do
 * `selfdock enter`: A way to enter a running instance, like `docker exec -it`. Should be possible already with `nsenter`, dunno how yet.

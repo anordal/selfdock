@@ -17,5 +17,5 @@ selfdock = executable(
 
 meson.add_install_script('install.mk')
 setprefix = 'MESON_INSTALL_PREFIX=' + prefix
-run_target('uninstall', command: ['make', '-f', 'install.mk', setprefix, 'uninstall'])
+run_target('uninstall-actual', command: ['make', '-f', 'install.mk', setprefix, 'uninstall'])
 run_target('moduletest', command: ['make', '-f', 'install.mk', setprefix, 'test', '-j2'])
