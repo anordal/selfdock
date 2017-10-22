@@ -344,11 +344,13 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	const unsigned initial_stack_size = 4096;
+	// Apparently, this is just the stack size before exec.
+	// Apparently, 3 4K pages are needed to print to stderr (1 for stdout).
+	const unsigned initial_stack_size = 16*4096;
 	char *stack = mmap(
 		NULL, initial_stack_size,
 		PROT_READ|PROT_WRITE,
-		MAP_PRIVATE|MAP_GROWSDOWN|MAP_ANONYMOUS,
+		MAP_PRIVATE|MAP_ANONYMOUS,
 		-1, 0
 	);
 	if (stack == MAP_FAILED) {
