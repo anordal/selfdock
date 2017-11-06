@@ -1,0 +1,4 @@
+[wrap-git]
+directory=narg
+url=https://github.com/anordal/narg.git
+revision=d2ba836a450b43866738072056d97cdea17f3556

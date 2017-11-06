@@ -6,7 +6,7 @@ project('selfdock', 'c',
 prefix = get_option('prefix')
 rootoverlay = prefix + '/share/selfdock'
 
-narg = dependency('narg')
+narg = dependency('narg', fallback: ['narg', 'narg_dep'])
 
 selfdock = executable(
 	'selfdock', 'selfdock.c',
