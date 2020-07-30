@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Andreas Nordal
+ * Copyright 2015-2020 Andreas Nordal
  *
  * This Source Code Form is subject to the terms of the
  * Mozilla Public License, v. 2.0.
@@ -12,8 +12,8 @@
 #include <libintl.h>
 #include <sched.h> //clone
 #include <errno.h>
-#include <fcntl.h> //open
-#include <sys/stat.h> //mkdir
+#include <fcntl.h> //open, AT_FDCWD
+#include <sys/stat.h> //mkdir, utimensat
 #include <sys/wait.h>
 #include <sys/mount.h>
 #include <unistd.h>
@@ -82,59 +82,45 @@ static _Bool isdir_pathname(const char *path)
 	return strchr(path, '/') && 0 == lstat(path, &info) && S_ISDIR(info.st_mode);
 }
 
-// Use overlayfs to emulate a readonly bind mount when required,
-// as indicated by a non-NULL @upper argumment, else bind mount.
-// Errmsg printing taken care of.
-static int mount_bind(const char* lower, const char* upper, const char* dst)
+// Updates atime if writable → only suitable when not supposed to.
+static _Bool check_erofs(const char* path)
 {
+	static const struct timespec atime[2] = {
+		{ 0, UTIME_NOW },
+		{ 0, UTIME_OMIT },
+	};
+	return utimensat(AT_FDCWD, path, atime, 0) != 0 && errno == EROFS;
+}
+
+static int mount_bind_rw(const char* src, const char* dst)
+{
+	if (mount(src, dst, NULL, MS_BIND, NULL)) {
+		fprintf(stderr, "bindmount «%s» → «%s»: %s\n", src, dst, strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
+static int mount_bind_ro(const char* src, const char* dst)
+{
+	if (mount_bind_rw(src, dst)) {
+		return -1;
+	}
+
 	const char *errmsg;
-	if (upper) {
-		char opt[PATH_MAX];
-		if (PATH_MAX <= snprintf(opt, PATH_MAX, "lowerdir=%s:%s", upper, lower)) {
-			errmsg = strerror(ENAMETOOLONG);
-			goto fail;
-		}
-		if (mount("none", dst, "overlay", MS_RDONLY, opt)) {
-			errmsg = (errno == ENODEV)
-				? "Overlayfs (Linux 3.18 or newer) needed. "
-				"Sorry, this requirement is a Linux specific workaround "
-				"for lack of a readonly bindmount."
-				: strerror(errno)
-			;
-			goto fail;
-		}
-	} else {
-		if (mount(lower, dst, NULL, MS_BIND, NULL)) {
-			errmsg = strerror(errno);
-			goto fail;
-		}
+	if (mount(NULL, dst, NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, NULL)) {
+		errmsg = strerror(errno);
+		goto fail;
+	}
+	if (!check_erofs(dst)) {
+		errmsg = "Still not readonly! This is supported from Linux 2.6.26, see mount(2).";
+		goto fail;
 	}
 	return 0;
 
 fail:
-	if (upper) {
-		fprintf(stderr, "bindmount «%s» + «%s» → «%s»: %s\n", lower, upper, dst, errmsg);
-	} else {
-		fprintf(stderr, "bindmount «%s» → «%s»: %s\n", lower, dst, errmsg);
-	}
+	fprintf(stderr, "remount,bind,ro %s: %s\n", dst, errmsg);
 	return -1;
-}
-
-// assume no (writable) on failure
-static _Bool is_readonly_rootfs(const char *rootdir)
-{
-	char path[PATH_MAX];
-	if (PATH_MAX <= snprintf(path, PATH_MAX, "%s/bin/sh", rootdir)) {
-		return 0;
-	}
-
-	int fd = open(path, O_RDWR);
-	if (fd != -1) {
-		close(fd);
-		return 0;
-	}
-
-	return (errno == EROFS);
 }
 
 struct child_args {
@@ -158,10 +144,9 @@ static int child(void *arg)
 
 	static const char newroot[] = TOSTRING(ROOTOVERLAY) "/dev/empty";
 
-	if (mount_bind(
-		self->oldroot,
-		self->permit_writable ? NULL : TOSTRING(ROOTOVERLAY),
-		newroot))
+	if (self->permit_writable
+		? mount_bind_rw(self->oldroot, newroot)
+		: mount_bind_ro(self->oldroot, newroot))
 	{
 		return EXIT_CANNOT;
 	}
@@ -171,28 +156,18 @@ static int child(void *arg)
 		return EXIT_CANNOT;
 	}
 
-	if (self->permit_writable) {
-		if (mount_bind(TOSTRING(ROOTOVERLAY) "/dev", NULL, "dev")) {
-			return EXIT_CANNOT;
-		}
+	if (mount_bind_ro(TOSTRING(ROOTOVERLAY) "/dev", "dev")) {
+		return EXIT_CANNOT;
 	}
 
 	for (unsigned i=0; i < self->map->paramc; i += 2) {
-		if (mount_bind(
-			self->map->paramv[i],
-			TOSTRING(ROOTOVERLAY) "/dev/empty",
-			self->map->paramv[i+1]+1))
-		{
+		if (mount_bind_ro(self->map->paramv[i], self->map->paramv[i+1]+1)) {
 			return EXIT_CANNOT;
 		}
 	}
 
 	for (unsigned i=0; i < self->vol->paramc; i += 2) {
-		if (mount_bind(
-			self->vol->paramv[i],
-			NULL,
-			self->vol->paramv[i+1]+1))
-		{
+		if (mount_bind_rw(self->map->paramv[i], self->map->paramv[i+1]+1)) {
 			return EXIT_CANNOT;
 		}
 	}
@@ -372,8 +347,7 @@ int main(int argc, char *argv[])
 		return EXIT_CANNOT;
 	}
 	if (0 == strcmp(argv[nargres.arg], "run")) {
-		// Use overlayfs sparingly; it has a maximum stacking depth.
-		barnebok.permit_writable = is_readonly_rootfs(barnebok.oldroot);
+		barnebok.permit_writable = 0;
 	} else if (0 == strcmp(argv[nargres.arg], "build")) {
 		barnebok.permit_writable = ~0;
 	} else {

@@ -14,9 +14,6 @@ DIRS =\
 	$(DEV)/empty\
 	$(DEV)/pts\
 	$(PREFIX)/bin\
-	$(ROOTOVERLAY)/proc\
-	$(ROOTOVERLAY)/run\
-	$(ROOTOVERLAY)/tmp\
 
 .PHONY: install uninstall
 install: $(PREFIX)/bin/selfdock | $(DIRS) $(DEVFILES)
