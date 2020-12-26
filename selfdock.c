@@ -167,7 +167,7 @@ static int child(void *arg)
 	}
 
 	for (unsigned i=0; i < self->vol->paramc; i += 2) {
-		if (mount_bind_rw(self->map->paramv[i], self->map->paramv[i+1]+1)) {
+		if (mount_bind_rw(self->vol->paramv[i], self->vol->paramv[i+1]+1)) {
 			return EXIT_CANNOT;
 		}
 	}
