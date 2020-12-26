@@ -191,14 +191,13 @@ static int child(void *arg)
 		perror("tmp");
 		return EXIT_CANNOT;
 	}
-	uid_t uid = getuid();
 	if (chmod("tmp", 0777)) {
 		perror("tmp");
 		return EXIT_CANNOT;
 	}
 
 	// Drop effective uid
-	if (setuid(uid)) {
+	if (setuid(getuid())) {
 		perror("setuid");
 		return EXIT_CANNOT;
 	}
@@ -290,15 +289,13 @@ int main(int argc, char *argv[])
 	}
 
 	for (unsigned i=0; i < ansv[OPT_MAP].paramc; i += 2) {
-		if (ansv[OPT_MAP].paramv[i+1][0] != '/')
-		{
+		if (ansv[OPT_MAP].paramv[i+1][0] != '/') {
 			fprintf(stderr, "%s destinations must be absolute\n", "--map");
 			return EXIT_CANNOT;
 		}
 	}
 	for (unsigned i=0; i < ansv[OPT_VOL].paramc; i += 2) {
-		if (ansv[OPT_VOL].paramv[i+1][0] != '/')
-		{
+		if (ansv[OPT_VOL].paramv[i+1][0] != '/') {
 			fprintf(stderr, "%s destinations must be absolute\n", "--vol");
 			return EXIT_CANNOT;
 		}
