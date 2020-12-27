@@ -128,7 +128,7 @@ struct child_args {
 	_Bool has_tmp;
 	const char *oldroot;
 	const char *cd;
-	struct narg_optparam *map, *vol;
+	struct narg_optparam *map, *vol, *tmp;
 	char *const *argv;
 };
 static int child(void *arg)
@@ -186,6 +186,16 @@ static int child(void *arg)
 	if (mount("none", "dev/pts", "devpts", MS_NOEXEC, NULL)) {
 		perror("mount devpts");
 		return EXIT_CANNOT;
+	}
+
+	for (unsigned i=0; i < self->tmp->paramc; i += 2) {
+		const char *dst = self->tmp->paramv[i+1];
+		if (mount("none", dst, "tmpfs", MS_NOEXEC, self->tmp->paramv[i])
+			|| chmod(dst, 0777))
+		{
+			perror(dst);
+			return EXIT_CANNOT;
+		}
 	}
 
 	if (!self->has_tmp) {
@@ -252,6 +262,7 @@ int main(int argc, char *argv[])
 		OPT_CD,
 		OPT_MAP,
 		OPT_VOL,
+		OPT_TMP,
 		OPT_ENV,
 		OPT_ENV_RM,
 		OPT_IGN,
@@ -263,6 +274,7 @@ int main(int argc, char *argv[])
 		{"C", NULL, "DIR","Working directory"},
 		{"m","map"," SRC DST","Mount SRC to DST read-only"},
 		{"v","vol"," SRC DST","Mount SRC to DST read-write"},
+		{"t","tmpfs"," OPT DST","Mount tmpfs with options OPT at DST"},
 		{"e","env"," ENV val","Set environment variable ENV to val"},
 		{"E", NULL, "ENV","Unset environment variable ENV"},
 		{NULL,"",&narg_metavar.ignore_rest,"Don\'t interpret further arguments as options"}
@@ -273,6 +285,7 @@ int main(int argc, char *argv[])
 		[OPT_CD ] = {1, (const char*[]){"/"}},
 		[OPT_MAP] = {0, NULL},
 		[OPT_VOL] = {0, NULL},
+		[OPT_TMP] = {0, NULL},
 		[OPT_ENV] = {0, NULL},
 		[OPT_ENV_RM] = {0, NULL},
 		[OPT_IGN] = {0, NULL}
@@ -312,6 +325,7 @@ int main(int argc, char *argv[])
 	barnebok.cd  = ansv[OPT_CD].paramv[0];
 	barnebok.map = ansv+OPT_MAP;
 	barnebok.vol = ansv+OPT_VOL;
+	barnebok.tmp = ansv+OPT_TMP;
 	barnebok.argv = argv + nargres.arg + 1; // += optional + positional args
 
 	if (argc - nargres.arg < 2) {
@@ -328,7 +342,7 @@ int main(int argc, char *argv[])
 		return EXIT_CANNOT;
 	}
 
-	for (unsigned o=OPT_MAP; o <= OPT_VOL; ++o) {
+	for (unsigned o=OPT_MAP; o <= OPT_TMP; ++o) {
 		for (unsigned i=0; i < ansv[o].paramc; i += 2) {
 			const char *dst = ansv[o].paramv[i+1];
 			if (dst[0] != '/') {

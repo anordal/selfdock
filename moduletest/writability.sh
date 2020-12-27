@@ -31,3 +31,6 @@ has_mnt_opt=( sh -c 'while read dev mnt type opt dump pass; do test "$mnt" = "$0
 ! "$1" run "${has_mnt_opt[@]}" /usr rw
 ! "$1" -m /usr /usr run "${has_mnt_opt[@]}" /usr rw
 "$1" -v /usr /usr run "${has_mnt_opt[@]}" /usr rw
+
+"$1" run "${has_mnt_opt[@]}" /tmp size=2048k
+"$1" -t size=4K /tmp run "${has_mnt_opt[@]}" /tmp size=4k
