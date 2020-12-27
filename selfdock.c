@@ -316,20 +316,6 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	// Apparently, this is just the stack size before exec.
-	// Apparently, 3 4K pages are needed to print to stderr (1 for stdout).
-	const unsigned initial_stack_size = 16*4096;
-	char *stack = mmap(
-		NULL, initial_stack_size,
-		PROT_READ|PROT_WRITE,
-		MAP_PRIVATE|MAP_ANONYMOUS,
-		-1, 0
-	);
-	if (stack == MAP_FAILED) {
-		perror("mmap");
-		return EXIT_CANNOT;
-	}
-
 	struct child_args barnebok;
 	barnebok.oldroot = ansv[OPT_ROOT].paramv[0];
 	barnebok.cd  = ansv[OPT_CD].paramv[0];
@@ -355,6 +341,20 @@ int main(int argc, char *argv[])
 	int sigfail = start_handling_signals();
 	if (sigfail) {
 		fprintf(stderr, "sigaction(sig=%d): %s\n", sigfail, strerror(errno));
+		return EXIT_CANNOT;
+	}
+
+	// Apparently, this is just the stack size before exec.
+	// Apparently, 3 4K pages are needed to print to stderr (1 for stdout).
+	const unsigned initial_stack_size = 16*4096;
+	char *stack = mmap(
+		NULL, initial_stack_size,
+		PROT_READ|PROT_WRITE,
+		MAP_PRIVATE|MAP_ANONYMOUS,
+		-1, 0
+	);
+	if (stack == MAP_FAILED) {
+		perror("mmap");
 		return EXIT_CANNOT;
 	}
 
@@ -388,5 +388,9 @@ int main(int argc, char *argv[])
 			psignal(WTERMSIG(status), barnebok.argv[0]);
 		}
 	} while (0);
+
+	if (munmap(stack, initial_stack_size)) {
+		perror("munmap");
+	}
 	return ret;
 }
