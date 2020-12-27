@@ -125,6 +125,7 @@ fail:
 
 struct child_args {
 	_Bool permit_writable;
+	_Bool has_tmp;
 	const char *oldroot;
 	const char *cd;
 	struct narg_optparam *map, *vol;
@@ -187,13 +188,13 @@ static int child(void *arg)
 		return EXIT_CANNOT;
 	}
 
-	if (mount("none", "tmp", "tmpfs", MS_NOEXEC, "size=2M")) {
-		perror("tmp");
-		return EXIT_CANNOT;
-	}
-	if (chmod("tmp", 0777)) {
-		perror("tmp");
-		return EXIT_CANNOT;
+	if (!self->has_tmp) {
+		if (mount("none", "/tmp", "tmpfs", MS_NOEXEC, "size=2M")
+			|| chmod("/tmp", 0777))
+		{
+			perror("/tmp");
+			return EXIT_CANNOT;
+		}
 	}
 
 	// Drop effective uid
@@ -288,18 +289,6 @@ int main(int argc, char *argv[])
 		return EXIT_SUCCESS;
 	}
 
-	for (unsigned i=0; i < ansv[OPT_MAP].paramc; i += 2) {
-		if (ansv[OPT_MAP].paramv[i+1][0] != '/') {
-			fprintf(stderr, "%s destinations must be absolute\n", "--map");
-			return EXIT_CANNOT;
-		}
-	}
-	for (unsigned i=0; i < ansv[OPT_VOL].paramc; i += 2) {
-		if (ansv[OPT_VOL].paramv[i+1][0] != '/') {
-			fprintf(stderr, "%s destinations must be absolute\n", "--vol");
-			return EXIT_CANNOT;
-		}
-	}
 	for (unsigned i=0; i < ansv[OPT_ENV].paramc; i += 2) {
 		const char *env = ansv[OPT_ENV].paramv[i];
 		const char *val = ansv[OPT_ENV].paramv[i+1];
@@ -317,6 +306,8 @@ int main(int argc, char *argv[])
 	}
 
 	struct child_args barnebok;
+	barnebok.permit_writable = 0;
+	barnebok.has_tmp = 0;
 	barnebok.oldroot = ansv[OPT_ROOT].paramv[0];
 	barnebok.cd  = ansv[OPT_CD].paramv[0];
 	barnebok.map = ansv+OPT_MAP;
@@ -330,12 +321,24 @@ int main(int argc, char *argv[])
 		return EXIT_CANNOT;
 	}
 	if (0 == strcmp(argv[nargres.arg], "run")) {
-		barnebok.permit_writable = 0;
 	} else if (0 == strcmp(argv[nargres.arg], "build")) {
 		barnebok.permit_writable = ~0;
 	} else {
 		fputs("Action must be \"run\" or \"build\" for now. TODO: enter\n", stderr);
 		return EXIT_CANNOT;
+	}
+
+	for (unsigned o=OPT_MAP; o <= OPT_VOL; ++o) {
+		for (unsigned i=0; i < ansv[o].paramc; i += 2) {
+			const char *dst = ansv[o].paramv[i+1];
+			if (dst[0] != '/') {
+				fprintf(stderr, "--%s destinations must be absolute\n", optv[o].longopt);
+				return EXIT_CANNOT;
+			}
+			if (0 == strcmp(dst+1, "tmp")) {
+				barnebok.has_tmp = ~0;
+			}
+		}
 	}
 
 	int sigfail = start_handling_signals();
