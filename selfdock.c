@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h> //mmap
+#include <spawn.h> //posix_spawnp
 
 #define STRINGIFY(x) #x
 #define TOSTRING(x) STRINGIFY(x)
@@ -40,10 +41,17 @@
 #define EXIT_CMDNOTEXEC  126 //applicable convention
 #define EXIT_CMDNOTFOUND 127 //applicable convention
 
-static volatile int sigrid;
+static volatile pid_t signalrecipent = 0;
 static void take_signal(int sig)
 {
-	sigrid = sig;
+	// Kill is async-signal-safe if errno is restored (man 7 signal-safety).
+	int restore = errno;
+	pid_t pid = signalrecipent;
+	if (pid != 0)
+	{
+		kill(pid, sig);
+	}
+	errno = restore;
 }
 
 static int start_handling_signals()
@@ -63,23 +71,35 @@ static int start_handling_signals()
 	for (unsigned i=0; i != ARRAY_SIZE(handleable_signals); ++i) {
 		int sig = handleable_signals[i];
 		if (sigaction(sig, &sa, NULL)) {
+			fprintf(stderr, "sigaction(sig=%d): %s\n", sig, strerror(errno));
 			return sig;
 		}
 	}
 	return 0;
 }
 
-static _Bool is_suid(const char *path)
+typedef enum
 {
-	struct stat info;
-	return 0 == stat(path, &info) && info.st_mode & S_ISUID;
-}
+	DIAGNOSIS_ENOENT,
+	DIAGNOSIS_NOSUID,
+	DIAGNOSIS_ISSUID,
+} ExecDiagnosis;
 
-// is what execvp calls a pathname && exists && is (a symlink to) a directory
-static _Bool isdir_pathname(const char *path)
+static ExecDiagnosis diagnose_executable(const char *path, int *errval)
 {
 	struct stat info;
-	return strchr(path, '/') && 0 == lstat(path, &info) && S_ISDIR(info.st_mode);
+	if (stat(path, &info))
+	{
+		return DIAGNOSIS_ENOENT;
+	}
+
+	if (S_ISDIR(info.st_mode) && strchr(path, '/'))
+	{
+		// Is (a symlink to) a directory && is what execvp calls a pathname:
+		// EISDIR is more appropriate than EACCES in this case.
+		*errval = EISDIR;
+	}
+	return (info.st_mode & S_ISUID) ? DIAGNOSIS_ISSUID : DIAGNOSIS_NOSUID;
 }
 
 // Updates atime if writable → only suitable when not supposed to.
@@ -121,6 +141,25 @@ static int mount_bind_ro(const char* src, const char* dst)
 fail:
 	fprintf(stderr, "remount,bind,ro %s: %s\n", dst, errmsg);
 	return -1;
+}
+
+static int wait_child(pid_t pid)
+{
+	signalrecipent = pid;
+	for (;;) {
+		int status;
+		if (-1 == waitpid(pid, &status, 0)) {
+			if (errno != EINTR) {
+				break;
+			}
+		} else if (WIFSIGNALED(status)) {
+			return 128 + WTERMSIG(status);
+		} else /*if (WIFEXITED(status))*/ {
+			return WEXITSTATUS(status);
+		}
+	}
+	perror("waitpid");
+	return 128 + SIGABRT;
 }
 
 struct child_args {
@@ -218,23 +257,16 @@ static int child(void *arg)
 		return EXIT_CANNOT;
 	}
 
-	execvp(self->argv[0], self->argv);
+	pid_t pid;
+	int errval = posix_spawnp(&pid, self->argv[0], NULL, NULL, self->argv, NULL);
+	if (errval == 0) {
+		return wait_child(pid);
+	}
 
 	// fail
-	int errval = errno;
-	if (errval == EACCES && isdir_pathname(self->argv[0])) {
-		errval = EISDIR;
-	}
+	ExecDiagnosis diagnosis = diagnose_executable(self->argv[0], &errval);
 	fprintf(stderr, "exec: %s: %s\n", self->argv[0], strerror(errval));
-	switch(errval) {
-		case ELOOP:
-		case ENAMETOOLONG:
-		case ENOENT:
-		case ENOTDIR:
-			return EXIT_CMDNOTFOUND;
-		default:
-			return EXIT_CMDNOTEXEC;
-	}
+	return (diagnosis == DIAGNOSIS_ENOENT) ? EXIT_CMDNOTFOUND : EXIT_CMDNOTEXEC;
 }
 
 const char *narg_strerror(unsigned err) {
@@ -355,9 +387,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	int sigfail = start_handling_signals();
-	if (sigfail) {
-		fprintf(stderr, "sigaction(sig=%d): %s\n", sigfail, strerror(errno));
+	if (start_handling_signals()) {
 		return EXIT_CANNOT;
 	}
 
@@ -377,34 +407,22 @@ int main(int argc, char *argv[])
 
 	pid_t pid = clone(
 		child, stack + initial_stack_size,
-		CLONE_VFORK|CLONE_VM|CLONE_NEWNS|CLONE_NEWPID|SIGCHLD,
+		CLONE_NEWNS|CLONE_NEWPID|SIGCHLD,
 		&barnebok
 	);
 
-	int ret = EXIT_CANNOT;
+	int ret;
 	if (pid == -1) {
-		if (!is_suid(argv[0])) {
-			fprintf(stderr, "No suid. Please check that the program is installed correctly.\n");
+		int errval = errno;
+		if (DIAGNOSIS_NOSUID == diagnose_executable(argv[0], &errval)) {
+			fprintf(stderr, "No suid. Please check that %s is installed correctly.\n", argv[0]);
 		} else {
-			fprintf(stderr, "clone: %s\n", strerror(errno));
+			fprintf(stderr, "clone: %s\n", strerror(errval));
 		}
-	} else do {
-		int status;
-		if (-1 == wait(&status)) {
-			if (errno == EINTR) {
-				int deliver = sigrid;
-				if (kill(pid, deliver)) {
-					fprintf(stderr, "Failed to deliver signal %s\n", strsignal(deliver));
-				}
-				continue;
-			}
-			perror("wait");
-		} else if (WIFEXITED(status)) {
-			ret = WEXITSTATUS(status);
-		} else if (WIFSIGNALED(status)) {
-			psignal(WTERMSIG(status), barnebok.argv[0]);
-		}
-	} while (0);
+		ret = EXIT_CMDNOTEXEC;
+	} else {
+		ret = wait_child(pid);
+	}
 
 	if (munmap(stack, initial_stack_size)) {
 		perror("munmap");
