@@ -46,6 +46,11 @@ Use a different root filesystem, say from another Linux installation:
 
     selfdock --rootfs /mnt/debian run sh
 
+You can clear the environment variables with `env -i` if you want the container to start
+from an empty environment:
+
+    selfdock --rootfs /mnt/debian run env -i sh
+
 [Extract a docker image](https://github.com/larsks/undocker) and use it as a root filesystem:
 
     docker save busybox | undocker -i -o /tmp/busybox busybox
